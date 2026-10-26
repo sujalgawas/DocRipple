@@ -1,22 +1,14 @@
-"""Internal AST span models used by the analyzer."""
+"""Internal symbol span models used by the analyzer."""
 
 from pydantic import BaseModel
 
 
-class ASTSpan(BaseModel):
-    """A tree-sitter capture — symbol name, kind, and location."""
+class ExtractedSymbolSpan(BaseModel):
+    """A symbol extracted from source code — name, kind, location, and decorators."""
 
     name: str
-    kind: str  # function_definition, class_definition, etc.
+    kind: str  # "function" | "class" | "method" | "route"
+    signature: str
     start_line: int
     end_line: int
-    source: str  # raw source bytes of the captured node
-
-
-class FileChange(BaseModel):
-    """Parsed representation of one file in a unified diff."""
-
-    path: str
-    added_lines: list[str] = []
-    removed_lines: list[str] = []
-    hunks: list[str] = []
+    decorators: list[str] = []

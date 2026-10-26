@@ -1,9 +1,9 @@
 """Analyzer-specific exceptions."""
 
 
-class DiffParseError(ValueError):
+class DiffParseError(Exception):
     """Failed to parse the unified diff."""
 
 
-class GrammarLoadError(RuntimeError):
-    """Failed to load a tree-sitter grammar for the target language."""
+class SymbolExtractionError(Exception):
+    """Failed to extract symbols from source code (tree-sitter grammar or AST error)."""
