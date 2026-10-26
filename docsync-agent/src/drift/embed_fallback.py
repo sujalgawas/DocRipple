@@ -1,11 +1,10 @@
 """Local semantic-similarity fallback for documentation sections.
 
-The matcher prefers local ``fastembed`` vectors when the model is already
-available.  If the package or its weights are missing (for example in an
-offline CI runner), it transparently switches to a deterministic NumPy TF-IDF
-model over word unigrams, word bigrams, character n-grams, and a small set of
-deterministic concept facets (for example rate-limit/throttle/quota).  No
-network or LLM calls are made by this module.
+The matcher uses lightweight NumPy TF-IDF vectors by default, which keeps the
+Render free tier below its 512 MB memory limit. Set ``EMBEDDING_MODE=fastembed``
+to opt in to local ``fastembed`` vectors; the package is imported lazily so the
+default path never imports or downloads ONNX weights. No network or LLM calls
+are made by this module.
 """
 
 from __future__ import annotations
@@ -20,6 +19,7 @@ from math import log
 
 import numpy as np
 
+from src.config import settings
 from src.drift.schemas import DocSectionNode
 
 logger = logging.getLogger(__name__)
@@ -428,10 +428,21 @@ def _cosine_similarities(query: np.ndarray, candidates: np.ndarray) -> np.ndarra
 
 
 def _build_default_embedder() -> Embedder:
-    """Load fastembed from the local cache, else return the TF-IDF embedder."""
+    """Return fastembed only when enabled; use TF-IDF on the default path."""
+    mode = (settings.EMBEDDING_MODE or "tfidf").strip().lower()
+    if mode != "fastembed":
+        return fallback_embed
+
     try:
         from fastembed import TextEmbedding
+    except ImportError:
+        logger.info(
+            "EMBEDDING_MODE=fastembed but fastembed is not installed; "
+            "using deterministic TF-IDF fallback"
+        )
+        return fallback_embed
 
+    try:
         model = TextEmbedding(
             DEFAULT_MODEL_NAME,
             local_files_only=True,

@@ -3,8 +3,14 @@
  * Target: import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"
  */
 
-export const API_BASE_URL =
+const configuredApiBaseUrl =
   import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+
+/** Single source of truth for the FastAPI origin (no trailing slash). */
+export const API_BASE_URL = configuredApiBaseUrl.replace(/\/+$/, "");
+
+/** Backwards-compatible alias used by older imports. */
+export const API_BASE = API_BASE_URL;
 
 // ── Models & Types ──────────────────────────────────────────────────────────
 
@@ -520,7 +526,7 @@ export async function getRunStatus(
 }
 
 /** Health check */
-export async function getHealth(): Promise<{ status: string; queue_size: number }> {
+export async function getHealth(): Promise<{ status: string; service: string }> {
   const res = await fetch(`${API_BASE_URL}/health`);
   if (!res.ok) {
     throw new Error(`Health check failed (${res.status})`);

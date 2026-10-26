@@ -158,7 +158,9 @@ def app_with_mocks() -> tuple[FastAPI, MockLLMClient, MockGitHubPublisher, MockR
 
     from src.main import demo_run, get_run_status, health
 
-    test_app.add_api_route("/health", health, methods=["GET"], tags=["system"])
+    test_app.add_api_route(
+        "/health", health, methods=["GET", "HEAD"], tags=["system"]
+    )
     test_app.add_api_route(
         "/api/v1/runs/{delivery_id}", get_run_status, methods=["GET"], tags=["runs"]
     )
@@ -358,8 +360,14 @@ async def test_health_and_demo_endpoints(app_with_mocks):
             # 1. Health
             health_resp = await client.get("/health")
             assert health_resp.status_code == 200
-            assert health_resp.json()["status"] == "ok"
-            assert "queue_size" in health_resp.json()
+            assert health_resp.json() == {
+                "status": "ok",
+                "service": "docripple-api",
+            }
+
+            head_resp = await client.head("/health")
+            assert head_resp.status_code == 200
+            assert head_resp.content == b""
 
             # 2. Demo Run
             demo_payload = {

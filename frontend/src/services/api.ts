@@ -1,13 +1,14 @@
 /**
  * Typed API client for the DocRipple FastAPI bridge.
  *
- * Every dashboard page is backed by real state from
- * `http://localhost:8000/api/v1/...`.
+ * Every dashboard request is issued against the centralized API base URL in
+ * `../lib/api`, which reads VITE_API_BASE_URL at build time.
  */
 
-export const API_BASE =
-  import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-export const API_BASE_URL = API_BASE;
+import { API_BASE_URL } from "../lib/api";
+
+export { API_BASE_URL };
+export const API_BASE = API_BASE_URL;
 
 // ── Shared models ───────────────────────────────────────────────────────────
 

@@ -238,7 +238,6 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "fastapi" },
-    { name = "fastembed" },
     { name = "httpx" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
@@ -262,6 +261,9 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
+embedding = [
+    { name = "fastembed" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -274,7 +276,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "fastembed", specifier = ">=0.4" },
+    { name = "fastembed", marker = "extra == 'embedding'", specifier = ">=0.4" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "langgraph", specifier = ">=0.2" },
@@ -293,7 +295,7 @@ requires-dist = [
     { name = "unidiff", specifier = ">=1.0.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["embedding", "dev"]
 
 [package.metadata.requires-dev]
 dev = [

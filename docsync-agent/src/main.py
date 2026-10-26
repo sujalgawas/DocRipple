@@ -7,7 +7,6 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, status
@@ -16,7 +15,16 @@ from pydantic import BaseModel, Field
 from src.analyzer.service import ChangeAnalyzerService
 from src.config import settings
 from src.context_store.sqlite_store import SqliteContextStore
-from src.contracts.schemas import ChangeReport, DriftReport, PublishResult, WebhookJob
+from src.contracts.schemas import (
+    ChangeReport,
+    DocStyleSkill,
+    DriftReport,
+    MemoryEdge,
+    MemoryNode,
+    PublishResult,
+    RepoMemoryMap,
+    WebhookJob,
+)
 from src.drift.service import DriftEngineService
 from src.ingest.router import router as ingest_router
 from src.onboarding.router import router as onboarding_router
@@ -29,6 +37,294 @@ from src.web_api.router import router as web_api_router
 
 logger = logging.getLogger("docsync")
 
+SEED_REPO_FULL_NAME = "sujalgawas/DocRipple"
+
+CORS_ORIGIN_REGEX = (
+    r"^https://.*\.vercel\.app$|^https://.*\.pages\.dev$|^http://localhost:\d+$"
+)
+
+
+def _cors_origins() -> list[str]:
+    """Return the deduplicated CORS allow-list from environment settings."""
+    origins: list[str] = []
+    for raw_origin in (settings.FRONTEND_URL, *settings.ALLOWED_ORIGINS.split(",")):
+        origin = raw_origin.strip().rstrip("/")
+        if origin and origin not in origins:
+            origins.append(origin)
+    return origins
+
+
+def _seed_style_skill() -> DocStyleSkill:
+    """Return the default Stage 0 writing skill for the seeded repository."""
+    return DocStyleSkill(
+        repo_full_name=SEED_REPO_FULL_NAME,
+        tone_and_voice=(
+            "Direct, practical, developer-first prose. Lead with what changed "
+            "and why it matters, then show a short runnable example."
+        ),
+        heading_conventions=[
+            "Use sentence-case H2/H3 headings",
+            "Keep one topic per section",
+            "Prefer short paragraphs and bullet lists for options",
+        ],
+        code_block_rules=[
+            "Fence every snippet with a language hint",
+            "Keep examples copy-paste ready",
+            "Show expected output only when it adds clarity",
+        ],
+        formatting_patterns=[
+            "Use inline code for symbols, flags, env vars, and paths",
+            "Link the first mention of external services",
+            "End how-to sections with a verification step",
+        ],
+        skill_markdown=(
+            "# SKILL: DocRipple\n\n"
+            "## Voice\n\n"
+            "- Write for developers who want the shortest path to a working result.\n"
+            "- Prefer concrete verbs and active voice.\n"
+            "- Explain the why before the how, but keep it brief.\n\n"
+            "## Structure\n\n"
+            "- Use sentence-case H2 and H3 headings.\n"
+            "- Keep one topic per section and lead with the outcome.\n"
+            "- Use bullet lists for independent options or prerequisites.\n\n"
+            "## Code and commands\n\n"
+            "- Always add a language hint to fenced code blocks.\n"
+            "- Keep snippets runnable and show the verification step.\n"
+            "- Use inline code for symbols, flags, environment variables, and paths.\n"
+        ),
+        generated_at=datetime.now(UTC),
+    )
+
+
+def _seed_memory_map() -> RepoMemoryMap:
+    """Return a small Stage 0 memory graph so the dashboard is populated."""
+    return RepoMemoryMap(
+        repo_full_name=SEED_REPO_FULL_NAME,
+        nodes=[
+            MemoryNode(
+                node_id="module:src/main.py",
+                repo_full_name=SEED_REPO_FULL_NAME,
+                node_type="module",
+                name="main",
+                path="src/main.py",
+                summary=(
+                    "FastAPI entry point with lifespan startup, CORS, health "
+                    "checks, and the demo pipeline route."
+                ),
+            ),
+            MemoryNode(
+                node_id="module:src/web_api/router.py",
+                repo_full_name=SEED_REPO_FULL_NAME,
+                node_type="module",
+                name="web_api.router",
+                path="src/web_api/router.py",
+                summary=(
+                    "Dashboard API for authentication, repositories, activity, "
+                    "manual triggers, and settings."
+                ),
+            ),
+            MemoryNode(
+                node_id="symbol:src/main.py::seed_default_repository",
+                repo_full_name=SEED_REPO_FULL_NAME,
+                node_type="symbol",
+                name="seed_default_repository",
+                path="src/main.py",
+                summary=(
+                    "Seeds the demo workspace when a fresh container starts "
+                    "with an empty SQLite database."
+                ),
+            ),
+            MemoryNode(
+                node_id="doc_section:README.md::getting-started",
+                repo_full_name=SEED_REPO_FULL_NAME,
+                node_type="doc_section",
+                name="getting-started",
+                path="README.md",
+                summary="Local setup, environment variables, and deployment overview.",
+            ),
+        ],
+        edges=[
+            MemoryEdge(
+                repo_full_name=SEED_REPO_FULL_NAME,
+                source_id="module:src/main.py",
+                target_id="symbol:src/main.py::seed_default_repository",
+                relation="CONTAINS",
+            ),
+            MemoryEdge(
+                repo_full_name=SEED_REPO_FULL_NAME,
+                source_id="module:src/main.py",
+                target_id="module:src/web_api/router.py",
+                relation="IMPORTS",
+            ),
+            MemoryEdge(
+                repo_full_name=SEED_REPO_FULL_NAME,
+                source_id="symbol:src/main.py::seed_default_repository",
+                target_id="doc_section:README.md::getting-started",
+                relation="DOCUMENTED_IN",
+            ),
+        ],
+        updated_at=datetime.now(UTC),
+    )
+
+
+async def seed_default_repository(store: SqliteContextStore) -> bool:
+    """Populate a fresh store with the DocRipple demo workspace.
+
+    Returns ``True`` when seeding ran and ``False`` when a monitored
+    repository already exists. All writes are idempotent, so a retry is safe.
+    """
+    if await store.list_monitored_repos():
+        return False
+
+    now = datetime.now(UTC)
+    owner, name = SEED_REPO_FULL_NAME.split("/", 1)
+
+    await store.upsert_monitored_repo(
+        repo_full_name=SEED_REPO_FULL_NAME,
+        owner=owner,
+        name=name,
+        watch_branch="main",
+        doc_paths=["README.md", "docs/**/*.md"],
+        drift_action="open_pr",
+        status="listening",
+        language="Python",
+        last_pushed_at=now.isoformat(),
+    )
+    await store.save_style_skill(_seed_style_skill())
+    await store.save_memory_map(_seed_memory_map())
+
+    seed_runs = [
+        {
+            "delivery_id": "seed-docripple-0003",
+            "commit_sha": "c72a5f9d1e8b4a6c0f2d3e5a7b9c1d3e5f7a9b1c",
+            "commit_message": "docs: document Render deployment and health checks",
+            "author": "sujalgawas",
+            "llm_calls": 2,
+            "status": "pr_open",
+            "pr_number": 13,
+            "pr_url": f"https://github.com/{SEED_REPO_FULL_NAME}/pull/13",
+            "diff_preview": {
+                "file_path": "src/main.py",
+                "deleted_lines": ["-@app.get(\"/health\")"],
+                "added_lines": [
+                    "+@app.api_route(\"/health\", methods=[\"GET\", \"HEAD\"])",
+                ],
+                "context": "@@ -129,7 +129,7 @@",
+                "changed_symbols": [
+                    {
+                        "file_path": "src/main.py",
+                        "symbol_name": "health",
+                        "symbol_kind": "route",
+                        "change_class": "api_surface",
+                        "change_type": "modified",
+                        "old_signature": "GET /health",
+                        "new_signature": "GET, HEAD /health",
+                    }
+                ],
+                "impacted_sections": [
+                    {
+                        "doc_path": "README.md",
+                        "heading": "Deployment",
+                        "anchor": None,
+                        "matched_symbols": ["health"],
+                        "match_method": "exact_anchor",
+                        "confidence_score": 0.88,
+                    }
+                ],
+            },
+        },
+        {
+            "delivery_id": "seed-docripple-0002",
+            "commit_sha": "8b1d4e0f2a6c9b7d5e3f1a0c8b6d4e2f0a9c7b5d",
+            "commit_message": "refactor: simplify documentation drift matching internals",
+            "author": "sujalgawas",
+            "llm_calls": 0,
+            "status": "no_drift",
+            "pr_number": None,
+            "pr_url": None,
+            "diff_preview": {
+                "file_path": "src/drift/embed_fallback.py",
+                "deleted_lines": ["-    return np.clip(scores, 0.0, 1.0)"],
+                "added_lines": ["+    return np.clip(similarities, 0.0, 1.0)"],
+                "context": "@@ -420,7 +420,7 @@",
+                "changed_symbols": [
+                    {
+                        "file_path": "src/drift/embed_fallback.py",
+                        "symbol_name": "_cosine_similarities",
+                        "symbol_kind": "function",
+                        "change_class": "behavior",
+                        "change_type": "modified",
+                        "old_signature": None,
+                        "new_signature": None,
+                    }
+                ],
+                "impacted_sections": [],
+            },
+        },
+        {
+            "delivery_id": "seed-docripple-0001",
+            "commit_sha": "3f9c2a1d4b5e6f708192a3b4c5d6e7f8091a2b3c",
+            "commit_message": "feat(api): add repository sync trigger endpoint",
+            "author": "sujalgawas",
+            "llm_calls": 3,
+            "status": "merged",
+            "pr_number": 12,
+            "pr_url": f"https://github.com/{SEED_REPO_FULL_NAME}/pull/12",
+            "diff_preview": {
+                "file_path": "src/web_api/router.py",
+                "deleted_lines": [],
+                "added_lines": [
+                    "+@router.post(\"/repos/{owner}/{repo}/trigger\")",
+                    "+async def trigger_repo(...):",
+                ],
+                "context": "@@ -463,6 +463,8 @@",
+                "changed_symbols": [
+                    {
+                        "file_path": "src/web_api/router.py",
+                        "symbol_name": "trigger_repo",
+                        "symbol_kind": "route",
+                        "change_class": "api_surface",
+                        "change_type": "added",
+                        "old_signature": None,
+                        "new_signature": "POST /api/v1/repos/{owner}/{repo}/trigger",
+                    }
+                ],
+                "impacted_sections": [
+                    {
+                        "doc_path": "README.md",
+                        "heading": "API Reference",
+                        "anchor": None,
+                        "matched_symbols": ["trigger_repo"],
+                        "match_method": "graph_edge",
+                        "confidence_score": 0.92,
+                    }
+                ],
+            },
+        },
+    ]
+
+    # Insert oldest first so the newest run (pr_open) sorts to the top.
+    for run in reversed(seed_runs):
+        await store.create_activity_run(
+            run["delivery_id"],
+            SEED_REPO_FULL_NAME,
+            commit_sha=run["commit_sha"],
+            commit_message=run["commit_message"],
+            author=run["author"],
+            status=run["status"],
+            llm_calls=run["llm_calls"],
+            diff_preview=run["diff_preview"],
+        )
+        if run["pr_number"] is not None:
+            await store.update_activity_run(
+                run["delivery_id"],
+                pr_number=run["pr_number"],
+                pr_url=run["pr_url"],
+            )
+
+    logger.info("Seeded demo workspace for %s", SEED_REPO_FULL_NAME)
+    return True
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -40,10 +336,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     store = SqliteContextStore(settings.SQLITE_DB_PATH)
     await store.initialize()
 
-    # 2. Shared Webhook Queue
+    # 2. Seed a fresh deployment so the dashboard is never empty. Render's
+    #    free tier resets /tmp on each redeploy, so this runs on cold boot.
+    try:
+        await seed_default_repository(store)
+    except Exception:
+        logger.exception("Could not seed the demo workspace; continuing startup")
+
+    # 3. Shared Webhook Queue
     queue: asyncio.Queue[WebhookJob] = asyncio.Queue()
 
-    # 3. Domain module services
+    # 4. Domain module services
     analyzer = ChangeAnalyzerService()
     drift_engine = DriftEngineService()
     onboarding_service = OnboardingService(context_store=store)
@@ -106,12 +409,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=_cors_origins(),
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -126,12 +425,10 @@ app.include_router(web_api_router)
 # ── Observability & Demo Endpoints ──────────────────────────────────────────
 
 
-@app.get("/health", tags=["system"])
-async def health(request: Request) -> dict[str, Any]:
-    """Health check returning queue size and status."""
-    queue = getattr(request.app.state, "webhook_queue", None)
-    qsize = queue.qsize() if queue is not None else 0
-    return {"status": "ok", "queue_size": qsize}
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["system"])
+async def health() -> dict[str, str]:
+    """Lightweight liveness probe used by Render and keep-alive pingers."""
+    return {"status": "ok", "service": "docripple-api"}
 
 
 @app.get(
