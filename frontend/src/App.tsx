@@ -7,6 +7,7 @@ import { RepositoriesPage } from "./pages/RepositoriesPage";
 import { RepoDetailPage } from "./pages/RepoDetailPage";
 import { AddRepositoryPage } from "./pages/AddRepositoryPage";
 import { ActivityPage } from "./pages/ActivityPage";
+import { SettingsPage } from "./pages/SettingsPage";
 
 export const App: React.FC = () => {
   return (
@@ -22,6 +23,7 @@ export const App: React.FC = () => {
           <Route path="/repositories/new" element={<AddRepositoryPage />} />
           <Route path="/repositories/:owner/:repo" element={<RepoDetailPage />} />
           <Route path="/activity" element={<ActivityPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
         </Route>
 
         {/* Fallback */}
