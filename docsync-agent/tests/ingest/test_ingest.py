@@ -33,7 +33,7 @@ class MockContextStore:
         return []
 
 
-def sign_payload(body: bytes, secret: str = "dev-secret") -> str:
+def sign_payload(body: bytes, secret: str = "docripple-secret") -> str:
     """Compute HMAC-SHA256 signature for test payload bytes."""
     digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     return f"sha256={digest}"
@@ -139,6 +139,7 @@ async def test_valid_pull_request_synchronize_enqueued(
     assert data["job"]["base_sha"] == "base-sha-123"
     assert data["job"]["head_sha"] == "head-sha-456"
     assert data["job"]["ref"] == "feature/docs"
+    assert data["job"]["base_ref"] == "main"
 
     assert queue.qsize() == 1
     enqueued_job = await queue.get()

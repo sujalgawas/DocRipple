@@ -70,7 +70,17 @@ class IngestService:
             base_sha = payload.get("before", "")
             head_sha = payload.get("after", "")
             ref = payload.get("ref", "")
+            base_ref = ""
             pr_number = None
+            head_commit = payload.get("head_commit") or {}
+            commit_message = head_commit.get("message", "")
+            author = (
+                (head_commit.get("author") or {}).get("username")
+                or (head_commit.get("author") or {}).get("name")
+                or (payload.get("pusher") or {}).get("name")
+                or (payload.get("sender") or {}).get("login")
+                or ""
+            )
         else:  # pull_request
             pr_data = payload.get("pull_request") or {}
             base_data = pr_data.get("base") or {}
@@ -78,7 +88,14 @@ class IngestService:
             base_sha = base_data.get("sha", "")
             head_sha = head_data.get("sha", "")
             ref = head_data.get("ref") or base_data.get("ref") or ""
+            base_ref = base_data.get("ref", "")
             pr_number = payload.get("number")
+            commit_message = pr_data.get("title", "")
+            author = (
+                (pr_data.get("user") or {}).get("login")
+                or (payload.get("sender") or {}).get("login")
+                or ""
+            )
 
         job = WebhookJob(
             delivery_id=delivery_id,
@@ -87,8 +104,11 @@ class IngestService:
             base_sha=base_sha,
             head_sha=head_sha,
             ref=ref,
+            base_ref=base_ref,
             pr_number=pr_number,
             received_at=datetime.now(UTC),
+            commit_message=commit_message,
+            author=author,
         )
 
         # 7. Push to background queue

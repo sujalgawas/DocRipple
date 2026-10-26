@@ -8,6 +8,7 @@ from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
+from src.config import settings
 from src.contracts.protocols import ContextStoreProtocol
 from src.contracts.schemas import WebhookJob
 from src.ingest.config import IngestConfig
@@ -15,7 +16,13 @@ from src.ingest.config import IngestConfig
 
 @lru_cache
 def get_ingest_config() -> IngestConfig:
-    return IngestConfig()
+    """Return ingest settings with the app-wide webhook secret applied.
+
+    Webhook installation and HMAC verification must use one secret; the
+    dashboard configures ``GITHUB_WEBHOOK_SECRET``, so verification follows it
+    rather than the legacy ``DOCSYNC_INGEST_`` prefixed value.
+    """
+    return IngestConfig(GITHUB_WEBHOOK_SECRET=settings.GITHUB_WEBHOOK_SECRET)
 
 
 def get_job_queue(request: Request) -> asyncio.Queue[WebhookJob]:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+from pydantic import BaseModel
+
 from src.contracts.schemas import DocStyleSkill, DriftReport, RepoMemoryMap
 from src.orchestrator.config import OrchestratorConfig
 from src.orchestrator.github_client import HttpGitHubPublisher
@@ -15,6 +17,38 @@ from src.orchestrator.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _CountingLLMClient:
+    """Delegate to an LLM client while counting every completion request."""
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+        self.calls = 0
+
+    def reset(self) -> None:
+        self.calls = 0
+
+    async def generate_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_schema: type[BaseModel],
+    ) -> BaseModel:
+        self.calls += 1
+        return await self._inner.generate_json(  # type: ignore[attr-defined]
+            system_prompt, user_prompt, response_schema
+        )
+
+    async def generate_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        self.calls += 1
+        return await self._inner.generate_text(  # type: ignore[attr-defined]
+            system_prompt, user_prompt
+        )
 
 
 class OrchestratorService:
@@ -33,11 +67,13 @@ class OrchestratorService:
     ) -> None:
         self._config = config or OrchestratorConfig()
 
-        self._llm_client = llm_client or OpenAICompatibleLLMClient(
+        inner_llm = llm_client or OpenAICompatibleLLMClient(
             base_url=self._config.llm_base_url,
             api_key=self._config.llm_api_key,
             model=self._config.llm_model,
         )
+        self._llm_client = _CountingLLMClient(inner_llm)
+        self.last_llm_calls = 0
 
         self._github_publisher = github_publisher or HttpGitHubPublisher(
             token=self._config.github_token,
@@ -87,9 +123,13 @@ class OrchestratorService:
             "publish_result": None,
         }
 
-        async with _checkpointer(self._config.checkpoint_db_path) as saver:
-            compiled = graph.compile(checkpointer=saver)
-            final = await compiled.ainvoke(initial, config)
+        self._llm_client.reset()
+        try:
+            async with _checkpointer(self._config.checkpoint_db_path) as saver:
+                compiled = graph.compile(checkpointer=saver)
+                final = await compiled.ainvoke(initial, config)
+        finally:
+            self.last_llm_calls = self._llm_client.calls
 
         result: PublishResult | None = final.get("publish_result")
         if result is not None:

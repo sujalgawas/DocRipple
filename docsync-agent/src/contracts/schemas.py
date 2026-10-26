@@ -20,8 +20,11 @@ class WebhookJob(BaseModel):
     base_sha: str
     head_sha: str
     ref: str
+    base_ref: str = ""
     pr_number: int | None = None
     received_at: datetime
+    commit_message: str = ""
+    author: str = ""
 
 
 class ChangedSymbol(BaseModel):

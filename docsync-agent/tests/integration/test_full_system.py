@@ -137,7 +137,7 @@ class MockGitHubPublisher:
         return "https://github.com/org/repo/pull/101", 101
 
 
-def sign(payload_bytes: bytes, secret: str = "dev-secret") -> str:
+def sign(payload_bytes: bytes, secret: str = "docripple-secret") -> str:
     """Compute GitHub HMAC-SHA256 signature."""
     digest = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
     return f"sha256={digest}"
