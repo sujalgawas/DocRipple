@@ -13,8 +13,12 @@ class AppSettings(BaseSettings):
         extra="ignore",
     )
 
-    GITHUB_WEBHOOK_SECRET: str = "dev-secret"
     GITHUB_TOKEN: str = ""
+    GITHUB_CLIENT_ID: str = ""
+    GITHUB_CLIENT_SECRET: str = ""
+    PUBLIC_WEBHOOK_URL: str = ""
+    GITHUB_WEBHOOK_SECRET: str = "docripple-secret"
+    FRONTEND_URL: str = "http://localhost:5173"
     LLM_BASE_URL: str = "https://api.openai.com/v1"
     LLM_API_KEY: str = "dev-key"
     LLM_MODEL: str = "gpt-4o-mini"

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import aiosqlite
@@ -463,6 +463,295 @@ class SqliteContextStore:
             evidence=[],
         )
 
+    # ── Web API: monitored repositories ─────────────────────────────────
+
+    async def upsert_monitored_repo(
+        self,
+        repo_full_name: str,
+        owner: str,
+        name: str,
+        *,
+        watch_branch: str = "main",
+        doc_paths: list[str] | None = None,
+        drift_action: str = "open_pr",
+        status: str = "listening",
+        language: str | None = None,
+        webhook_id: int | None = None,
+        last_pushed_at: str | None = None,
+    ) -> None:
+        """Insert or update a repository watched by the web dashboard."""
+        doc_paths = doc_paths or ["README.md", "docs/**/*.md"]
+        created_at = datetime.now(UTC).isoformat()
+
+        await self._db.execute(
+            """INSERT INTO monitored_repos
+               (repo_full_name, owner, name, watch_branch, doc_paths_json,
+                drift_action, status, language, webhook_id, last_pushed_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (repo_full_name) DO UPDATE SET
+                   owner = excluded.owner,
+                   name = excluded.name,
+                   watch_branch = excluded.watch_branch,
+                   doc_paths_json = excluded.doc_paths_json,
+                   drift_action = excluded.drift_action,
+                   status = excluded.status,
+                   language = excluded.language,
+                   webhook_id = COALESCE(excluded.webhook_id, monitored_repos.webhook_id),
+                   last_pushed_at = COALESCE(
+                       excluded.last_pushed_at, monitored_repos.last_pushed_at
+                   )""",
+            (
+                repo_full_name,
+                owner,
+                name,
+                watch_branch,
+                json.dumps(doc_paths),
+                drift_action,
+                status,
+                language,
+                webhook_id,
+                last_pushed_at,
+                created_at,
+            ),
+        )
+        await self._db.commit()
+
+    async def get_monitored_repo(self, repo_full_name: str) -> dict | None:
+        """Return one monitored repository row with parsed doc paths."""
+        cursor = await self._db.execute(
+            "SELECT * FROM monitored_repos WHERE repo_full_name = ?",
+            (repo_full_name,),
+        )
+        row = await cursor.fetchone()
+        return _monitored_repo_row(row) if row is not None else None
+
+    async def list_monitored_repos(self) -> list[dict]:
+        """Return every monitored repository, newest first."""
+        cursor = await self._db.execute(
+            "SELECT * FROM monitored_repos ORDER BY created_at DESC, repo_full_name"
+        )
+        rows = await cursor.fetchall()
+        return [_monitored_repo_row(row) for row in rows]
+
+    async def delete_monitored_repo(self, repo_full_name: str) -> None:
+        """Remove a repository from the dashboard watch list."""
+        await self._db.execute(
+            "DELETE FROM monitored_repos WHERE repo_full_name = ?",
+            (repo_full_name,),
+        )
+        await self._db.commit()
+
+    async def clear_monitored_repos(self) -> int:
+        """Delete every monitored repository and return the removed count."""
+        cursor = await self._db.execute("DELETE FROM monitored_repos")
+        await self._db.commit()
+        return cursor.rowcount
+
+    # ── Web API: activity runs ──────────────────────────────────────────
+
+    async def create_activity_run(
+        self,
+        delivery_id: str,
+        repo_full_name: str,
+        *,
+        commit_sha: str = "",
+        commit_message: str = "",
+        author: str = "",
+        status: str = "running",
+        llm_calls: int = 0,
+        diff_preview: dict | str | None = None,
+    ) -> None:
+        """Insert a new run row when a webhook or manual trigger starts."""
+        diff_payload = (
+            json.dumps(diff_preview)
+            if isinstance(diff_preview, dict)
+            else diff_preview
+        )
+        await self._db.execute(
+            """INSERT OR IGNORE INTO activity_runs
+               (delivery_id, repo_full_name, commit_sha, commit_message, author,
+                status, llm_calls, diff_preview, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                delivery_id,
+                repo_full_name,
+                commit_sha,
+                commit_message,
+                author,
+                status,
+                llm_calls,
+                diff_payload,
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+        await self._db.commit()
+
+    async def update_activity_run(
+        self,
+        delivery_id: str,
+        *,
+        commit_sha: str | None = None,
+        commit_message: str | None = None,
+        author: str | None = None,
+        status: str | None = None,
+        llm_calls: int | None = None,
+        pr_url: str | None = None,
+        pr_number: int | None = None,
+        evidence_table_md: str | None = None,
+        diff_preview: dict | str | None = None,
+    ) -> None:
+        """Patch fields on an activity run as it moves through the pipeline."""
+        updates: list[str] = []
+        params: list[object] = []
+        values = {
+            "commit_sha": commit_sha,
+            "commit_message": commit_message,
+            "author": author,
+            "status": status,
+            "llm_calls": llm_calls,
+            "pr_url": pr_url,
+            "pr_number": pr_number,
+            "evidence_table_md": evidence_table_md,
+        }
+        for column, value in values.items():
+            if value is not None:
+                updates.append(f"{column} = ?")
+                params.append(value)
+
+        if diff_preview is not None:
+            updates.append("diff_preview = ?")
+            params.append(
+                json.dumps(diff_preview)
+                if isinstance(diff_preview, dict)
+                else diff_preview
+            )
+
+        if not updates:
+            return
+
+        params.append(delivery_id)
+        await self._db.execute(
+            f"UPDATE activity_runs SET {', '.join(updates)} WHERE delivery_id = ?",
+            params,
+        )
+        await self._db.commit()
+
+    async def get_activity_run(self, delivery_id: str) -> dict | None:
+        """Return one activity row with its diff preview decoded."""
+        cursor = await self._db.execute(
+            "SELECT * FROM activity_runs WHERE delivery_id = ?",
+            (delivery_id,),
+        )
+        row = await cursor.fetchone()
+        return _activity_run_row(row) if row is not None else None
+
+    async def list_activity_runs(
+        self,
+        *,
+        repo_full_name: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """Return activity runs newest first, optionally scoped to a repo."""
+        query = "SELECT * FROM activity_runs"
+        params: list[object] = []
+        if repo_full_name:
+            query += " WHERE repo_full_name = ?"
+            params.append(repo_full_name)
+        query += " ORDER BY created_at DESC, delivery_id DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+
+        cursor = await self._db.execute(query, params)
+        rows = await cursor.fetchall()
+        return [_activity_run_row(row) for row in rows]
+
+    async def get_activity_stats(self) -> dict[str, int]:
+        """Aggregate dashboard counters from activity runs."""
+        week_start = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+        cursor = await self._db.execute(
+            "SELECT COUNT(*) FROM activity_runs WHERE created_at >= ?",
+            (week_start,),
+        )
+        runs_this_week = (await cursor.fetchone())[0]
+
+        cursor = await self._db.execute(
+            "SELECT COUNT(*) FROM activity_runs "
+            "WHERE status = 'no_drift' AND llm_calls = 0"
+        )
+        skipped_zero_tokens = (await cursor.fetchone())[0]
+
+        cursor = await self._db.execute(
+            "SELECT COUNT(*) FROM activity_runs WHERE status = 'merged'"
+        )
+        prs_merged = (await cursor.fetchone())[0]
+
+        return {
+            "runs_this_week": int(runs_this_week),
+            "skipped_zero_tokens": int(skipped_zero_tokens),
+            "prs_merged": int(prs_merged),
+        }
+
+    async def get_run_counts_by_repo(self) -> dict[str, int]:
+        """Return activity counts keyed by repository full name."""
+        cursor = await self._db.execute(
+            "SELECT repo_full_name, COUNT(*) FROM activity_runs GROUP BY repo_full_name"
+        )
+        rows = await cursor.fetchall()
+        return {row[0]: int(row[1]) for row in rows}
+
+    # ── Web API: user settings ──────────────────────────────────────────
+
+    async def get_user_settings(self) -> dict:
+        """Return the singleton settings row, creating defaults on first read."""
+        await self._db.execute(
+            "INSERT OR IGNORE INTO user_settings (id) VALUES (1)"
+        )
+        await self._db.commit()
+        cursor = await self._db.execute("SELECT * FROM user_settings WHERE id = 1")
+        row = await cursor.fetchone()
+        return dict(row) if row is not None else {}
+
+    async def update_user_settings(
+        self,
+        *,
+        github_username: str | None = None,
+        require_reviewer_approval: int | None = None,
+        skip_internal_changes: int | None = None,
+        email_on_failed_runs: int | None = None,
+    ) -> dict:
+        """Update the singleton settings row and return the fresh values."""
+        await self.get_user_settings()
+        updates: list[str] = []
+        params: list[object] = []
+        values = {
+            "github_username": github_username,
+            "require_reviewer_approval": require_reviewer_approval,
+            "skip_internal_changes": skip_internal_changes,
+            "email_on_failed_runs": email_on_failed_runs,
+        }
+        for column, value in values.items():
+            if value is not None:
+                updates.append(f"{column} = ?")
+                params.append(value)
+
+        if updates:
+            await self._db.execute(
+                f"UPDATE user_settings SET {', '.join(updates)} WHERE id = 1",
+                params,
+            )
+            await self._db.commit()
+
+        return await self.get_user_settings()
+
+    async def clear_github_username(self) -> None:
+        """Clear the stored GitHub username (used by the disconnect action)."""
+        await self.get_user_settings()
+        await self._db.execute(
+            "UPDATE user_settings SET github_username = NULL WHERE id = 1"
+        )
+        await self._db.commit()
+
     # ── Embedding cache (bonus) ──────────────────────────────────────────
 
     async def get_cached_embedding(
@@ -505,6 +794,31 @@ class SqliteContextStore:
             (repo_full_name, doc_path, section_heading, content_hash, embedding_json),
         )
         await self._db.commit()
+
+
+def _monitored_repo_row(row: aiosqlite.Row) -> dict:
+    """Serialize a monitored_repos row, decoding its JSON doc path list."""
+    data = dict(row)
+    try:
+        doc_paths = json.loads(data.get("doc_paths_json") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        doc_paths = []
+    data["doc_paths"] = doc_paths if isinstance(doc_paths, list) else []
+    return data
+
+
+def _activity_run_row(row: aiosqlite.Row) -> dict:
+    """Serialize an activity_runs row, decoding its JSON diff preview."""
+    data = dict(row)
+    raw_preview = data.get("diff_preview")
+    if isinstance(raw_preview, str) and raw_preview:
+        try:
+            data["diff_preview"] = json.loads(raw_preview)
+        except json.JSONDecodeError:
+            data["diff_preview"] = None
+    else:
+        data["diff_preview"] = None
+    return data
 
 
 def _node_matches_seed(node: MemoryNode, seeds: set[str]) -> bool:
