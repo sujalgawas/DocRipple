@@ -1,36 +1,61 @@
-"""Orchestrator state definition for the LangGraph state machine."""
+"""Orchestrator state — TypedDict for LangGraph StateGraph + plan/draft models."""
 
-from typing import Optional, Annotated
-from dataclasses import dataclass, field
+from __future__ import annotations
 
-from src.contracts.schemas import ChangeReport, DriftReport, PublishResult
+from typing import TypedDict
+
+from pydantic import BaseModel
+
+from src.contracts.schemas import DriftReport
+from src.orchestrator.schemas import EvidenceRow, PublishResult
 
 
-@dataclass
-class OrchestratorState:
-    """State carried through the LangGraph pipeline."""
+class SectionEditPlan(BaseModel):
+    """A targeted edit plan for one doc section produced by the Planner node."""
 
-    # Input
-    change_report: Optional[ChangeReport] = None
-    drift_report: Optional[DriftReport] = None
+    doc_path: str
+    heading: str
+    target_symbols: list[str]
+    instructions: str
 
-    # Planner output
-    edit_plan: list[dict] = field(default_factory=list)  # [{doc_path, section, action, instructions}]
 
-    # Writer output
-    updated_docs: dict[str, str] = field(default_factory=dict)  # doc_path -> new_content
+class SectionDraft(BaseModel):
+    """A rewritten section draft produced by the Writer node."""
 
-    # Verifier output
-    verification_errors: list[str] = field(default_factory=list)
+    doc_path: str
+    heading: str
+    updated_markdown: str
+    evidence: list[EvidenceRow]
 
-    # Reviewer output
-    review_approved: bool = False
-    review_feedback: str = ""
-    retry_count: int = 0
 
-    # Publisher output
-    publish_result: Optional[PublishResult] = None
+class OrchestratorState(TypedDict, total=False):
+    """State carried through the LangGraph pipeline.
 
-    # Control
-    max_retries: int = 2
-    error: Optional[str] = None
+    Fields are intentionally ``total=False`` so partial updates from nibble
+    nodes work correctly.
+    """
+
+    # ── Input ──────────────────────────────────────────────────────────
+    drift_report: DriftReport
+    full_docs: dict[str, str]  # doc_path -> full_markdown
+
+    # ── Planner output ─────────────────────────────────────────────────
+    edit_plans: list[SectionEditPlan]
+
+    # ── Writer output ──────────────────────────────────────────────────
+    drafts: list[SectionDraft]
+    updated_docs: dict[str, str]
+
+    # ── Verifier output ────────────────────────────────────────────────
+    verification_errors: list[str]
+
+    # ── Reviewer output ────────────────────────────────────────────────
+    review_approved: bool
+    review_feedback: str
+
+    # ── Retry control ──────────────────────────────────────────────────
+    retry_count: int
+    max_retries: int
+
+    # ── Publisher output ───────────────────────────────────────────────
+    publish_result: PublishResult | None

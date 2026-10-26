@@ -1,82 +1,184 @@
-"""Publisher node — opens a GitHub PR with an Evidence Table."""
+"""Publisher node — builds evidence table, opens PR, persists edges."""
+
+from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
-from src.contracts.schemas import PublishResult
-from src.orchestrator.github_client import create_branch, commit_file, create_pull_request
+from src.contracts.schemas import CodeDocEdge
+from src.orchestrator.schemas import EvidenceRow, PublishResult
 from src.orchestrator.state import OrchestratorState
+
+if TYPE_CHECKING:
+    from src.orchestrator.github_client import GitHubPublisherProtocol
+    from src.orchestrator.schemas import OrchestratorContextStoreProtocol
 
 logger = logging.getLogger(__name__)
 
 
-async def publisher_node(state: OrchestratorState) -> OrchestratorState:
-    """Create a branch, commit updated docs, and open a PR."""
-    if not state.review_approved:
-        logger.info("Publisher skipped — review not approved")
-        return state
+def build_publisher_node(
+    github_publisher: GitHubPublisherProtocol,
+    context_store: OrchestratorContextStoreProtocol,
+):
+    """Return a publisher node with injected dependencies."""
 
-    report = state.drift_report
-    if not report:
-        state.error = "No drift report for publishing"
-        return state
+    async def publisher_node(state: OrchestratorState) -> dict:
+        """Build evidence table, create PR, persist edges and results."""
+        review_approved: bool = state.get("review_approved", False)
 
-    # Derive repo info (in production this comes from the webhook job)
-    job = state.change_report
-    repo = "owner/repo"  # placeholder
-    base_branch = "main"
-    branch_name = f"docsync/{report.job_id[:8]}"
+        if not review_approved:
+            logger.info("Publisher skipped — review not approved")
+            return {}
 
-    try:
-        # TODO: Get base_sha from repo in production
-        await create_branch(repo, branch_name, "placeholder-sha")
+        drift = state["drift_report"]
+        change_report = drift.change_report
+        updated_docs: dict[str, str] = state.get("updated_docs", {})
+        drafts = state.get("drafts", [])
+        verification_errors: list[str] = state.get("verification_errors", [])
+        retry_count: int = state.get("retry_count", 0)
 
-        updated_files: list[str] = []
-        for doc_path, content in state.updated_docs.items():
-            await commit_file(
-                repo,
-                branch_name,
-                doc_path,
-                content,
-                f"docs: update {doc_path} for {report.job_id[:8]}",
+        if not updated_docs:
+            logger.info("No updated docs to publish")
+            result = PublishResult(
+                delivery_id=change_report.delivery_id,
+                verification_status="failed",
+                error="No updated docs",
             )
-            updated_files.append(doc_path)
+            return {"publish_result": result}
 
-        # Build evidence table for PR body
-        evidence_rows = "\n".join(
-            f"| `{e.symbol}` | `{e.doc_path}` | {e.status} |"
-            for e in report.evidence
+        # Derive verification status:
+        #   "failed"   → errors remain at publish time (forced approve)
+        #   "repaired" → errors were fixed via retry loop
+        #   "passed"   → clean first-pass
+        verification_status = (
+            "failed"
+            if verification_errors
+            else ("repaired" if retry_count > 0 else "passed")
         )
+
+        # ── Build Evidence Table ──────────────────────────────────────
+        all_evidence: list[EvidenceRow] = []
+        for draft in drafts:
+            for row in draft.evidence:
+                row.verification = verification_status
+                all_evidence.append(row)
+
+        if not all_evidence:
+            # Fallback: build evidence from edit plans
+            for plan in state.get("edit_plans", []):
+                for s_name in plan.target_symbols:
+                    cs = _find_symbol(change_report.changed_symbols, s_name)
+                    if cs is None:
+                        continue
+                    all_evidence.append(
+                        EvidenceRow(
+                            doc_file=plan.doc_path,
+                            section=plan.heading,
+                            changed_symbol=s_name,
+                            change_class=cs.change_class,
+                            match_method="graph_edge",
+                            verification=verification_status,
+                        )
+                    )
+
+        evidence_table_md = _build_evidence_table(all_evidence)
+
+        # ── Create PR ─────────────────────────────────────────────────
+        delivery_id = change_report.delivery_id
+        branch_name = f"docsync/{delivery_id[:8]}"
+        pr_title = f"docs: sync for {delivery_id[:8]}"
+
+        files_list = "\n".join(f"- `{p}`" for p in sorted(updated_docs.keys()))
         pr_body = f"""## DocSync Update
 
 ### Evidence Table
-| Symbol | Document | Status |
-|--------|----------|--------|
-{evidence_rows}
+{evidence_table_md}
 
-### Changes
-{chr(10).join(f'- {f}' for f in updated_files)}
+### Updated Files
+{files_list}
 
-> Auto-generated by DocSync Agent ({report.job_id})
+> Auto-generated by DocSync Agent — delivery `{delivery_id}`
 """
 
-        pr = await create_pull_request(
-            repo,
-            branch_name,
-            base_branch,
-            f"docs: sync for {report.job_id[:8]}",
-            pr_body,
-        )
+        try:
+            pr_url, pr_number = await github_publisher.create_docs_pr(
+                repo_full_name=change_report.repo_full_name,
+                base_sha=change_report.base_sha,
+                branch_name=branch_name,
+                updated_docs=updated_docs,
+                pr_title=pr_title,
+                pr_body=pr_body,
+            )
 
-        state.publish_result = PublishResult(
-            job_id=report.job_id,
-            pr_url=pr.get("html_url"),
-            pr_number=pr.get("number"),
-            files_updated=updated_files,
-        )
-        logger.info("Published PR %s", pr.get("html_url"))
+            # ── Persist edges to context store ────────────────────────
+            new_edges: list[CodeDocEdge] = []
+            for row in all_evidence:
+                new_edges.append(
+                    CodeDocEdge(
+                        repo_full_name=change_report.repo_full_name,
+                        symbol_name=row.changed_symbol,
+                        file_path="",
+                        doc_path=row.doc_file,
+                        section_heading=row.section,
+                        anchor_type="explicit_anchor",
+                    )
+                )
 
-    except Exception as exc:
-        logger.error("Publisher failed: %s", exc)
-        state.publish_result = PublishResult(job_id=report.job_id, error=str(exc))
+            if new_edges:
+                try:
+                    await context_store.save_edges(new_edges)
+                except Exception:
+                    logger.warning("Failed to persist edges to context store", exc_info=True)
 
-    return state
+            result = PublishResult(
+                delivery_id=delivery_id,
+                pr_url=pr_url,
+                pr_number=pr_number,
+                evidence_table_md=evidence_table_md,
+                verification_status=verification_status,
+                files_updated=sorted(updated_docs.keys()),
+            )
+
+            # Persist publish result
+            try:
+                await context_store.save_publish_result(result)
+            except Exception:
+                logger.warning("Failed to persist publish result", exc_info=True)
+
+            logger.info("Published PR %s (#%d)", pr_url, pr_number)
+            return {"publish_result": result}
+
+        except Exception as exc:
+            logger.exception("Publisher failed")
+            result = PublishResult(
+                delivery_id=delivery_id,
+                verification_status="failed",
+                error=str(exc),
+                evidence_table_md=evidence_table_md,
+            )
+            return {"publish_result": result}
+
+    return publisher_node
+
+
+def _build_evidence_table(evidence: list[EvidenceRow]) -> str:
+    """Build a Markdown evidence table."""
+    if not evidence:
+        return "| Doc File | Section | Changed Symbol | Change Class | Match Method | Verification |\n|----------|---------|----------------|--------------|--------------|-------------|\n| — | — | — | — | — | — |"
+
+    header = "| Doc File | Section | Changed Symbol | Change Class | Match Method | Verification |"
+    sep = "|----------|---------|----------------|--------------|--------------|-------------|"
+    rows = [
+        f"| `{e.doc_file}` | {e.section} | `{e.changed_symbol}` | `{e.change_class}` | {e.match_method} | {e.verification} |"
+        for e in evidence
+    ]
+    return "\n".join([header, sep, *rows])
+
+
+def _find_symbol(symbols, name: str):
+    from src.contracts.schemas import ChangedSymbol
+
+    for s in symbols:
+        if isinstance(s, ChangedSymbol) and s.symbol_name == name:
+            return s
+    return None

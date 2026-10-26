@@ -1,98 +1,116 @@
-"""Async httpx client for GitHub branch creation, commits, and PRs."""
+"""GitHub publisher — protocol + httpx implementation."""
 
+from __future__ import annotations
+
+import base64
 import logging
+from typing import Protocol
 
 import httpx
-
-from src.config import settings
 
 logger = logging.getLogger(__name__)
 
 GITHUB_API_BASE = "https://api.github.com"
 
 
-def _headers() -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {settings.github_token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
+class GitHubPublisherProtocol(Protocol):
+    """Injectable GitHub backend — swap real HTTP for a fake in tests."""
+
+    async def create_docs_pr(
+        self,
+        repo_full_name: str,
+        base_sha: str,
+        branch_name: str,
+        updated_docs: dict[str, str],
+        pr_title: str,
+        pr_body: str,
+    ) -> tuple[str, int]:
+        """Create a PR with updated docs. Returns ``(pr_url, pr_number)``."""
+        ...
 
 
-async def create_branch(
-    repo_full_name: str,
-    branch_name: str,
-    base_sha: str,
-) -> dict:
-    """Create a new branch from the given base SHA."""
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{GITHUB_API_BASE}/repos/{repo_full_name}/git/refs",
-            headers=_headers(),
-            json={"ref": f"refs/heads/{branch_name}", "sha": base_sha},
-        )
-        resp.raise_for_status()
-        return resp.json()
+class HttpGitHubPublisher:
+    """Real GitHub REST API publisher via httpx."""
 
+    def __init__(self, token: str = "dev-github-token") -> None:
+        self._token = token
 
-async def commit_file(
-    repo_full_name: str,
-    branch_name: str,
-    path: str,
-    content: str,
-    message: str,
-) -> dict:
-    """Create or update a file in a branch."""
-    async with httpx.AsyncClient() as client:
-        # Get current file SHA if it exists
-        try:
-            existing = await client.get(
-                f"{GITHUB_API_BASE}/repos/{repo_full_name}/contents/{path}",
-                headers=_headers(),
-                params={"ref": branch_name},
-            )
-            existing.raise_for_status()
-            sha = existing.json().get("sha")
-        except httpx.HTTPStatusError:
-            sha = None
-
-        import base64
-
-        payload = {
-            "message": message,
-            "content": base64.b64encode(content.encode()).decode(),
-            "branch": branch_name,
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
         }
-        if sha:
-            payload["sha"] = sha
 
-        resp = await client.put(
-            f"{GITHUB_API_BASE}/repos/{repo_full_name}/contents/{path}",
-            headers=_headers(),
-            json=payload,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    async def create_docs_pr(
+        self,
+        repo_full_name: str,
+        base_sha: str,
+        branch_name: str,
+        updated_docs: dict[str, str],
+        pr_title: str,
+        pr_body: str,
+    ) -> tuple[str, int]:
+        """Create a branch, commit files, and open a PR."""
+        async with httpx.AsyncClient(base_url=GITHUB_API_BASE) as client:
+            # 1. Create branch ref
+            ref_path = f"/repos/{repo_full_name}/git/refs"
+            resp = await client.post(
+                ref_path,
+                headers=self._headers(),
+                json={
+                    "ref": f"refs/heads/{branch_name}",
+                    "sha": base_sha,
+                },
+            )
+            resp.raise_for_status()
 
+            # 2. Commit each updated doc
+            for doc_path, content in updated_docs.items():
+                file_url = f"/repos/{repo_full_name}/contents/{doc_path}"
 
-async def create_pull_request(
-    repo_full_name: str,
-    head_branch: str,
-    base_branch: str,
-    title: str,
-    body: str,
-) -> dict:
-    """Open a pull request."""
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{GITHUB_API_BASE}/repos/{repo_full_name}/pulls",
-            headers=_headers(),
-            json={
-                "title": title,
-                "body": body,
-                "head": head_branch,
-                "base": base_branch,
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()
+                # Get current SHA if file exists
+                try:
+                    existing = await client.get(
+                        file_url,
+                        headers=self._headers(),
+                        params={"ref": branch_name},
+                    )
+                    existing.raise_for_status()
+                    sha: str | None = existing.json().get("sha")
+                except httpx.HTTPStatusError:
+                    sha = None
+
+                payload: dict = {
+                    "message": f"docs: update {doc_path}",
+                    "content": base64.b64encode(content.encode()).decode(),
+                    "branch": branch_name,
+                }
+                if sha:
+                    payload["sha"] = sha
+
+                resp = await client.put(
+                    file_url,
+                    headers=self._headers(),
+                    json=payload,
+                )
+                resp.raise_for_status()
+
+            # 3. Create PR
+            pr_resp = await client.post(
+                f"/repos/{repo_full_name}/pulls",
+                headers=self._headers(),
+                json={
+                    "title": pr_title,
+                    "body": pr_body,
+                    "head": branch_name,
+                    "base": "main",
+                },
+            )
+            pr_resp.raise_for_status()
+            pr_data = pr_resp.json()
+
+            pr_url: str = pr_data.get("html_url", "")
+            pr_number: int = pr_data.get("number", 0)
+            logger.info("Created PR %s (#%d)", pr_url, pr_number)
+            return pr_url, pr_number
