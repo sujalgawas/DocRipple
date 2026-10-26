@@ -6,6 +6,7 @@ import { AppShell } from "./components/layout/AppShell";
 import { RepositoriesPage } from "./pages/RepositoriesPage";
 import { RepoDetailPage } from "./pages/RepoDetailPage";
 import { AddRepositoryPage } from "./pages/AddRepositoryPage";
+import { ActivityPage } from "./pages/ActivityPage";
 
 export const App: React.FC = () => {
   return (
@@ -20,6 +21,7 @@ export const App: React.FC = () => {
           <Route path="/repositories" element={<RepositoriesPage />} />
           <Route path="/repositories/new" element={<AddRepositoryPage />} />
           <Route path="/repositories/:owner/:repo" element={<RepoDetailPage />} />
+          <Route path="/activity" element={<ActivityPage />} />
         </Route>
 
         {/* Fallback */}
