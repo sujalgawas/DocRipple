@@ -1,15 +1,36 @@
+import React, { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { Logo } from "../common/Logo";
 import { FolderGit2, Activity, Settings, Plus, BookOpen } from "lucide-react";
+import { getAuthMe } from "../../services/api";
+import type { AuthMe } from "../../services/api";
 
 export const AppShell: React.FC = () => {
   const navigate = useNavigate();
+  const [me, setMe] = useState<AuthMe | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    getAuthMe()
+      .then((data) => {
+        if (active) setMe(data);
+      })
+      .catch(() => {
+        if (active) setMe(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const navItems = [
     { label: "Repositories", path: "/repositories", icon: FolderGit2 },
     { label: "Activity", path: "/activity", icon: Activity },
     { label: "Settings", path: "/settings", icon: Settings },
   ];
+
+  const username = me?.connected ? me.username : me ? "not connected" : "loading…";
+  const initial = (me?.username || "?").charAt(0).toUpperCase();
 
   return (
     <div className="flex min-h-screen bg-canvas text-primary selection:bg-accent-orange selection:text-black">
@@ -25,13 +46,23 @@ export const AppShell: React.FC = () => {
           {/* User Account Pill */}
           <div className="border border-[#26231D] bg-[#141310] rounded-xl p-2.5 flex items-center justify-between gap-2.5">
             <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-7 h-7 rounded-md bg-accent-orange text-black font-semibold text-xs flex items-center justify-center font-mono shrink-0 shadow-sm">
-                S
+              <div className="w-7 h-7 rounded-md bg-accent-orange text-black font-semibold text-xs flex items-center justify-center font-mono shrink-0 shadow-sm overflow-hidden">
+                {me?.avatar_url ? (
+                  <img
+                    src={me.avatar_url}
+                    alt={me.username || "GitHub avatar"}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  initial
+                )}
               </div>
-              <span className="text-sm font-medium text-primary truncate">sujalgawas</span>
+              <span className="text-sm font-medium text-primary truncate">
+                {username}
+              </span>
             </div>
             <span className="text-[11px] font-mono px-2 py-0.5 rounded border border-[#26231D] bg-[#1F1D18] text-muted shrink-0">
-              free
+              {me?.plan || "free"}
             </span>
           </div>
 

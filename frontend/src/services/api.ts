@@ -1,6 +1,15 @@
 /**
- * API client and types for DocRipple (FastAPI backend + local repo state).
+ * Typed API client for the DocRipple FastAPI bridge.
+ *
+ * Every dashboard page is backed by real state from
+ * `http://localhost:8000/api/v1/...`.
  */
+
+export const API_BASE =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+export const API_BASE_URL = API_BASE;
+
+// ── Shared models ───────────────────────────────────────────────────────────
 
 export interface DocStyleSkill {
   repo_full_name: string;
@@ -34,14 +43,6 @@ export interface RepoMemoryMap {
   nodes: MemoryNode[];
   edges: MemoryEdge[];
   updated_at?: string;
-}
-
-export interface OnboardRepoResult {
-  repo_full_name: string;
-  style_skill: DocStyleSkill;
-  memory_node_count: number;
-  memory_edge_count: number;
-  initial_code_doc_edges: number;
 }
 
 export interface DemoRunPayload {
@@ -80,189 +81,267 @@ export interface DemoRunResponse {
   } | null;
 }
 
-export interface RepositoryItem {
-  id: string;
+// ── Web API models ──────────────────────────────────────────────────────────
+
+export interface AuthMe {
+  connected: boolean;
+  username: string | null;
+  avatar_url: string | null;
+  plan: string;
+  authorized_repos_count: number;
+}
+
+export interface GitHubRepoSummary {
+  full_name: string;
+  name: string;
+  owner_login: string;
+  private: boolean;
+  default_branch: string;
+  language: string | null;
+  updated_at: string | null;
+}
+
+export type RunStatus = "running" | "no_drift" | "pr_open" | "merged" | "failed";
+
+export interface ActivityDiffPreview {
+  file_path: string;
+  deleted_lines: string[];
+  added_lines: string[];
+  context: string;
+  changed_symbols?: Array<{
+    file_path: string;
+    symbol_name: string;
+    symbol_kind: string;
+    change_class: string;
+    change_type: string;
+    old_signature?: string | null;
+    new_signature?: string | null;
+  }>;
+  impacted_sections?: Array<{
+    doc_path: string;
+    heading: string;
+    anchor?: string | null;
+    matched_symbols: string[];
+    match_method: string;
+    confidence_score: number;
+  }>;
+}
+
+export interface ActivityRun {
+  delivery_id: string;
+  repo_full_name: string;
+  commit_sha: string;
+  commit_message: string;
+  author: string;
+  status: RunStatus;
+  llm_calls: number;
+  pr_url: string | null;
+  pr_number: number | null;
+  evidence_table_md: string;
+  diff_preview: ActivityDiffPreview | null;
+  created_at: string;
+}
+
+export interface MonitoredRepo {
+  repo_full_name: string;
   owner: string;
   name: string;
-  fullName: string;
-  branch: string;
+  watch_branch: string;
+  doc_paths: string[];
+  drift_action: string;
   status: "listening" | "paused";
-  trackedDocs: string[];
-  language: string;
-  runsCount: number;
-  lastPushed: string;
-  lastCommit?: string;
-  isCustom?: boolean;
+  language: string | null;
+  webhook_id: number | null;
+  last_pushed_at: string | null;
+  created_at: string;
+  run_count?: number;
 }
 
-// Built-in starter repositories matching screenshots
-export const INITIAL_REPOSITORIES: RepositoryItem[] = [
-  {
-    id: "repo-docripple",
-    owner: "sujalgawas",
-    name: "DocRipple",
-    fullName: "sujalgawas/DocRipple",
-    branch: "main",
-    status: "listening",
-    trackedDocs: ["README.md", "docs/"],
-    language: "Python",
-    runsCount: 128,
-    lastPushed: "pushed 4 min ago",
-    lastCommit: "a3f9c21",
-  },
-  {
-    id: "repo-ledger-api",
-    owner: "sujalgawas",
-    name: "ledger-api",
-    fullName: "sujalgawas/ledger-api",
-    branch: "main",
-    status: "listening",
-    trackedDocs: ["README.md", "docs/api.md"],
-    language: "TypeScript",
-    runsCount: 61,
-    lastPushed: "pushed 2 h ago",
-    lastCommit: "c19e8f0",
-  },
-  {
-    id: "repo-billing-cli",
-    owner: "acme-labs",
-    name: "billing-cli",
-    fullName: "acme-labs/billing-cli",
-    branch: "develop",
-    status: "listening",
-    trackedDocs: ["docs/cli.md"],
-    language: "Go",
-    runsCount: 22,
-    lastPushed: "pushed yesterday",
-    lastCommit: "b8a101f",
-  },
-  {
-    id: "repo-design-tokens",
-    owner: "acme-labs",
-    name: "design-tokens",
-    fullName: "acme-labs/design-tokens",
-    branch: "main",
-    status: "paused",
-    trackedDocs: ["README.md"],
-    language: "TypeScript",
-    runsCount: 3,
-    lastPushed: "pushed 6 days ago",
-    lastCommit: "90fd2c4",
-  },
-];
-
-const LOCAL_STORAGE_KEY = "docripple_repos_v1";
-
-export function getStoredRepositories(): RepositoryItem[] {
-  try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (!raw) return INITIAL_REPOSITORIES;
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : INITIAL_REPOSITORIES;
-  } catch {
-    return INITIAL_REPOSITORIES;
-  }
+export interface DashboardStats {
+  runs_this_week: number;
+  skipped_zero_tokens: number;
+  prs_merged: number;
 }
 
-export function saveStoredRepository(repo: RepositoryItem): void {
-  try {
-    const current = getStoredRepositories();
-    const existingIndex = current.findIndex((r) => r.fullName.toLowerCase() === repo.fullName.toLowerCase());
-    let updated: RepositoryItem[];
-    if (existingIndex >= 0) {
-      updated = [...current];
-      updated[existingIndex] = repo;
-    } else {
-      updated = [repo, ...current];
-    }
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updated));
-  } catch (err) {
-    console.error("Failed to persist repo to localStorage", err);
-  }
+export interface DashboardResponse {
+  stats: DashboardStats;
+  repositories: MonitoredRepo[];
+  latest_runs: ActivityRun[];
 }
 
-const API_BASE = "";
+export interface ConnectRepoPayload {
+  repo_full_name: string;
+  watch_branch: string;
+  doc_paths: string[];
+  drift_action: string;
+}
 
-/** Trigger Stage 0 Onboarding */
-export async function onboardRepository(
-  repoFullName: string,
-  branch: string = "main",
-  codeFiles?: Record<string, string>,
-  docs?: Record<string, string>
-): Promise<OnboardRepoResult> {
-  const payload = {
-    repo_full_name: repoFullName,
-    branch,
-    code_files: codeFiles || {},
-    docs: docs || {},
-  };
+export interface ConnectRepoResponse {
+  status: "connected";
+  repo_full_name: string;
+  webhook_url: string | null;
+  style_skill_summary: string;
+  memory_nodes_count: number;
+  memory_edges_count: number;
+  webhook_error?: string;
+}
 
-  try {
-    const res = await fetch(`${API_BASE}/api/v1/repos/onboard`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) {
-      return await res.json();
-    }
-  } catch (err) {
-    console.warn("Backend /api/v1/repos/onboard unavailable, using synthetic Stage 0 fallback", err);
-  }
+export interface TriggerResponse {
+  status: "enqueued";
+  delivery_id: string;
+  repo_full_name: string;
+  commit_sha: string;
+  base_sha: string;
+  commit_message: string;
+  author: string;
+  branch: string;
+}
 
-  // Graceful fallback if backend is unreachable or snapshot missing
-  return {
-    repo_full_name: repoFullName,
-    style_skill: {
-      repo_full_name: repoFullName,
-      tone_and_voice: "Technical, direct, and imperative. Focus on reproducible copy-paste commands and architecture.",
-      heading_conventions: [
-        "Use Title Case for H1 and Sentence case for H2/H3",
-        "Keep heading anchors stable <!-- doc-anchor: <id> -->",
-        "Include badges and technology tags at the top",
-      ],
-      code_block_rules: [
-        "Always specify language identifier on fenced blocks (```python, ```bash, ```ts)",
-        "Use keepends=True or clean trailing newlines on diff patches",
-        "Demonstrate complete minimal invocations with expected output",
-      ],
-      formatting_patterns: [
-        "Include evidence tables for breaking changes",
-        "Highlight CLI flags in inline monospace backticks",
-      ],
-      skill_markdown: `---
-name: doc-style-skill
-description: Auto-extracted writing conventions for ${repoFullName}
----
-# Writing Style Skill for ${repoFullName}
+export interface UserSettings {
+  github_username: string | null;
+  require_reviewer_approval: boolean;
+  skip_internal_changes: boolean;
+  email_on_failed_runs: boolean;
+}
 
-- **Tone**: Technical, concise, developer-centric.
-- **Headings**: Use sentence case with <!-- doc-anchor: id --> comments.
-- **Code Fences**: Strict language identifiers on all fences.
-- **Evidence**: Provide clear before/after parameter examples.
-`,
+export interface DisconnectResponse {
+  status: "disconnected";
+  removed_repositories: number;
+  removed_webhooks: number;
+}
+
+// ── Request helper ──────────────────────────────────────────────────────────
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {}),
     },
-    memory_node_count: 32,
-    memory_edge_count: 48,
-    initial_code_doc_edges: 14,
-  };
+  });
+
+  if (!response.ok) {
+    let detail = `Request failed (${response.status})`;
+    try {
+      const body = await response.json();
+      if (typeof body?.detail === "string") {
+        detail = body.detail;
+      } else if (Array.isArray(body?.detail)) {
+        detail = body.detail
+          .map((item: { msg?: string }) => item.msg ?? "Invalid request")
+          .join(", ");
+      }
+    } catch {
+      // Keep the status-based fallback when the body is not JSON.
+    }
+    throw new Error(detail);
+  }
+
+  return (await response.json()) as T;
 }
 
-/** Fetch Stage 0 Writing Style Skill */
-export async function getRepoSkill(owner: string, repo: string): Promise<DocStyleSkill> {
+// ── Auth ────────────────────────────────────────────────────────────────────
+
+export function getAuthMe(): Promise<AuthMe> {
+  return request<AuthMe>("/api/v1/auth/me");
+}
+
+export function githubLoginUrl(): string {
+  return `${API_BASE}/api/v1/auth/github/login`;
+}
+
+// ── Repository discovery & onboarding ──────────────────────────────────────
+
+export function getGitHubRepos(): Promise<GitHubRepoSummary[]> {
+  return request<GitHubRepoSummary[]>("/api/v1/github/repos");
+}
+
+export function connectRepository(
+  payload: ConnectRepoPayload
+): Promise<ConnectRepoResponse> {
+  return request<ConnectRepoResponse>("/api/v1/repos/connect", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// ── Dashboard & activity ────────────────────────────────────────────────────
+
+export function getDashboard(): Promise<DashboardResponse> {
+  return request<DashboardResponse>("/api/v1/dashboard");
+}
+
+export function getActivity(repoFullName?: string): Promise<{ runs: ActivityRun[] }> {
+  const query = repoFullName
+    ? `?repo_full_name=${encodeURIComponent(repoFullName)}`
+    : "";
+  return request<{ runs: ActivityRun[] }>(`/api/v1/activity${query}`);
+}
+
+export function triggerRepo(
+  owner: string,
+  repo: string,
+  commitSha?: string
+): Promise<TriggerResponse> {
+  return request<TriggerResponse>(
+    `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/trigger`,
+    {
+      method: "POST",
+      body: JSON.stringify(commitSha ? { commit_sha: commitSha } : {}),
+    }
+  );
+}
+
+// ── Settings ────────────────────────────────────────────────────────────────
+
+export function getSettings(): Promise<UserSettings> {
+  return request<UserSettings>("/api/v1/settings");
+}
+
+export function updateSettings(
+  patch: Partial<
+    Pick<
+      UserSettings,
+      "require_reviewer_approval" | "skip_internal_changes" | "email_on_failed_runs"
+    >
+  >
+): Promise<UserSettings> {
+  return request<UserSettings>("/api/v1/settings", {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export function disconnectGitHub(): Promise<DisconnectResponse> {
+  return request<DisconnectResponse>("/api/v1/settings/disconnect", {
+    method: "POST",
+  });
+}
+
+// ── Stage 0 detail views (existing repo detail page) ───────────────────────
+
+/** Fetch the Stage 0 writing style skill. */
+export async function getRepoSkill(
+  owner: string,
+  repo: string
+): Promise<DocStyleSkill> {
   const repoFullName = `${owner}/${repo}`;
   try {
-    const res = await fetch(`${API_BASE}/api/v1/repos/${owner}/${repo}/skill`);
-    if (res.ok) {
-      return await res.json();
-    }
+    return await request<DocStyleSkill>(
+      `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/skill`
+    );
   } catch (err) {
-    console.warn(`Failed to fetch /skill for ${repoFullName}, returning fallback`, err);
+    console.warn(
+      `Failed to fetch /skill for ${repoFullName}, returning fallback`,
+      err
+    );
   }
 
   return {
     repo_full_name: repoFullName,
-    tone_and_voice: "Precise, developer-focused, imperative style. Uses evidence tables for PR transparency.",
+    tone_and_voice:
+      "Precise, developer-focused, imperative style. Uses evidence tables for PR transparency.",
     heading_conventions: [
       "H1: Repository Title & High-level Value",
       "H2: Functional Subsystems with doc-anchor comments",
@@ -294,7 +373,7 @@ version: 1.0.0
   };
 }
 
-/** Fetch Stage 0 Node/Edge Memory Map */
+/** Fetch the Stage 0 node/edge memory map. */
 export async function getRepoMemory(
   owner: string,
   repo: string,
@@ -303,17 +382,27 @@ export async function getRepoMemory(
   const repoFullName = `${owner}/${repo}`;
   try {
     const q = symbols ? `?symbols=${encodeURIComponent(symbols)}` : "";
-    const res = await fetch(`${API_BASE}/api/v1/repos/${owner}/${repo}/memory${q}`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data && Array.isArray(data.nodes) && data.nodes.length > 0) {
-        return data;
-      }
+    const data = await request<RepoMemoryMap>(
+      `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/memory${q}`
+    );
+    if (data && Array.isArray(data.nodes) && data.nodes.length > 0) {
+      return data;
     }
   } catch (err) {
-    console.warn(`Failed to fetch /memory for ${repoFullName}, returning fallback graph`, err);
+    console.warn(
+      `Failed to fetch /memory for ${repoFullName}, returning fallback graph`,
+      err
+    );
   }
 
+  return fallbackMemoryMap(repo, repoFullName, symbols);
+}
+
+function fallbackMemoryMap(
+  repo: string,
+  repoFullName: string,
+  symbols?: string
+): RepoMemoryMap {
   const allNodes: MemoryNode[] = [
     {
       node_id: `module:${repo}::core`,
@@ -402,7 +491,9 @@ export async function getRepoMemory(
 
   const nodeIds = new Set(filteredNodes.map((n) => n.node_id));
   const filteredEdges = symbols
-    ? allEdges.filter((e) => nodeIds.has(e.source_id) || nodeIds.has(e.target_id))
+    ? allEdges.filter(
+        (e) => nodeIds.has(e.source_id) || nodeIds.has(e.target_id)
+      )
     : allEdges;
 
   return {
@@ -412,16 +503,10 @@ export async function getRepoMemory(
   };
 }
 
-/** Execute Live Demo Drift Run */
-export async function executeDemoRun(payload: DemoRunPayload): Promise<DemoRunResponse> {
-  const res = await fetch(`${API_BASE}/api/v1/demo/run`, {
+/** Execute the synchronous demo run endpoint. */
+export function executeDemoRun(payload: DemoRunPayload): Promise<DemoRunResponse> {
+  return request<DemoRunResponse>("/api/v1/demo/run", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`Demo run failed (${res.status}): ${errorText}`);
-  }
-  return await res.json();
 }

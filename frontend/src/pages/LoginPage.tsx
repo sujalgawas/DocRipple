@@ -1,14 +1,37 @@
-import React from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useEffect, useState } from "react";
 import { Logo } from "../components/common/Logo";
-import { Check } from "lucide-react";
+import { Check, Loader2, AlertCircle } from "lucide-react";
+import { API_BASE, getAuthMe, githubLoginUrl } from "../services/api";
+import type { AuthMe } from "../services/api";
 
 export const LoginPage: React.FC = () => {
-  const navigate = useNavigate();
+  const [me, setMe] = useState<AuthMe | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    getAuthMe()
+      .then((data) => {
+        if (active) setMe(data);
+      })
+      .catch((err) => {
+        if (active) {
+          setError(err instanceof Error ? err.message : "Backend unreachable");
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const handleGitHubAuth = () => {
-    // Navigate into the authenticated dashboard
-    navigate("/repositories");
+    // Backend performs OAuth when configured, otherwise redirects straight to
+    // the dashboard using the GITHUB_TOKEN fallback.
+    window.location.href = githubLoginUrl();
   };
 
   return (
@@ -25,9 +48,42 @@ export const LoginPage: React.FC = () => {
           <h1 className="font-serif text-5xl sm:text-6xl text-[#F5F2EB] tracking-tight mb-3">
             Welcome back.
           </h1>
-          <p className="text-muted text-base mb-8">
+          <p className="text-muted text-base mb-4">
             One click. We only ask GitHub for what we need.
           </p>
+
+          {/* Live connection status */}
+          <div className="mb-7 font-mono text-xs min-h-[20px]">
+            {loading ? (
+              <span className="flex items-center gap-2 text-[#8E897F]">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Checking GitHub connection...
+              </span>
+            ) : me?.connected ? (
+              <span className="text-emerald-400">
+                Connected as @{me.username} · {me.authorized_repos_count}{" "}
+                repositories authorized
+              </span>
+            ) : error ? (
+              <span className="flex items-start gap-2 text-red-400">
+                <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                <span>
+                  Backend not reachable at {API_BASE}. Start it with{" "}
+                  <code className="text-[#F5F2EB]">
+                    uv run uvicorn src.main:app --reload
+                  </code>
+                  .
+                </span>
+              </span>
+            ) : (
+              <span className="text-[#8E897F]">
+                No GitHub token detected. Set{" "}
+                <code className="text-[#F5F2EB]">GITHUB_TOKEN</code> in{" "}
+                <code className="text-[#F5F2EB]">docsync-agent/.env</code> or
+                configure OAuth to connect.
+              </span>
+            )}
+          </div>
 
           {/* GitHub Auth Button */}
           <button
