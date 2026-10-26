@@ -14,6 +14,7 @@ from src.contracts.schemas import (
     PublishResult,
     RepoMemoryMap,
 )
+from src.contracts.protocols import OrchestratorProtocol
 
 # ── Evidence & Publish ────────────────────────────────────────────────────
 
@@ -30,16 +31,6 @@ class EvidenceRow(BaseModel):
 
 
 # ── Protocols ─────────────────────────────────────────────────────────────
-
-
-class OrchestratorProtocol(Protocol):
-    """Entry point for running the full LangGraph pipeline."""
-
-    async def run(
-        self,
-        drift_report: DriftReport,
-        full_docs: dict[str, str],
-    ) -> PublishResult: ...
 
 
 class OrchestratorContextStoreProtocol(Protocol):

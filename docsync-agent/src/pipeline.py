@@ -21,8 +21,8 @@ if TYPE_CHECKING:
         AnalyzerProtocol,
         ContextStoreProtocol,
         DriftEngineProtocol,
+        OrchestratorProtocol,
     )
-    from src.orchestrator.schemas import OrchestratorProtocol
     from src.web_api.github_service import GitHubService
 
 logger = logging.getLogger(__name__)

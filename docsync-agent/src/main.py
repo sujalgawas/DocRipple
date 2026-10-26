@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import os
+
+# Vercel runs the app from the read-only /var/task filesystem. Redirect HOME so
+# any library that writes cache or model files lands on the writable /tmp mount.
+os.environ.setdefault("HOME", "/tmp")
+
 import asyncio
 import logging
 from collections.abc import AsyncIterator
@@ -26,12 +32,17 @@ from src.contracts.schemas import (
     WebhookJob,
 )
 from src.drift.service import DriftEngineService
+from src.ingest.router import legacy_router as ingest_legacy_router
 from src.ingest.router import router as ingest_router
 from src.onboarding.router import router as onboarding_router
 from src.onboarding.service import OnboardingService
 from src.orchestrator.config import OrchestratorConfig
 from src.orchestrator.service import OrchestratorService
-from src.pipeline import BackgroundQueueWorker, DocSyncPipeline, GitHubRepoFetcher
+from src.pipeline import (
+    BackgroundQueueWorker,
+    DocSyncPipeline,
+    GitHubRepoFetcher,
+)
 from src.web_api.github_service import GitHubService, GitHubServicePublisher
 from src.web_api.router import router as web_api_router
 
@@ -375,15 +386,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         github_service=github_service,
     )
 
+    # Vercel Functions freeze background tasks once the response is returned,
+    # so a long-lived queue worker would strand work forever. In inline mode
+    # the request handlers execute the job directly instead of starting it.
+    execution_mode = (settings.EXECUTION_MODE or "inline").strip().lower()
+    inline_execution = bool(os.getenv("VERCEL")) and execution_mode != "queue"
+
     worker = BackgroundQueueWorker(queue=queue, pipeline=pipeline)
-    worker.start()
+    if not inline_execution:
+        worker.start()
 
     # Attach to app.state
+    app.state.queue = queue
     app.state.webhook_queue = queue
     app.state.context_store = store
     app.state.onboarding_service = onboarding_service
     app.state.pipeline = pipeline
     app.state.worker = worker
+    app.state.execution_mode = execution_mode
+    app.state.inline_execution = inline_execution
     app.state.settings = settings
     app.state.github_service = github_service
     app.state.github_oauth_token = ""
@@ -418,6 +439,7 @@ app.add_middleware(
 
 # Mount Stage 1 webhook router, Stage 0 onboarding router, and web API bridge
 app.include_router(ingest_router)
+app.include_router(ingest_legacy_router)
 app.include_router(onboarding_router)
 app.include_router(web_api_router)
 

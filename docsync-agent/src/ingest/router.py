@@ -18,11 +18,22 @@ from src.ingest.schemas import WebhookAckResponse
 from src.ingest.service import ingest_service
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["ingest"])
+legacy_router = APIRouter(tags=["ingest"])
 logger = logging.getLogger(__name__)
 
 
 @router.post(
     "/github",
+    response_model=WebhookAckResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+@legacy_router.post(
+    "/webhook",
+    response_model=WebhookAckResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+@legacy_router.post(
+    "/api/v1/webhook",
     response_model=WebhookAckResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
@@ -44,13 +55,40 @@ async def github_webhook(
             detail=f"Invalid JSON payload: {exc}",
         ) from exc
 
-    return await ingest_service.handle_webhook(
+    response = await ingest_service.handle_webhook(
         delivery_id=x_github_delivery,
         event_type=x_github_event,
         payload=payload,
         store=store,
         queue=queue,
     )
+
+    # On Vercel the function freezes as soon as the response is returned, so a
+    # queued job would never be processed. Run it inside this request instead.
+    if getattr(request.app.state, "inline_execution", False):
+        await _drain_queue_inline(request, queue)
+
+    return response
+
+
+async def _drain_queue_inline(
+    request: Request,
+    queue: asyncio.Queue[WebhookJob],
+) -> None:
+    """Execute every queued job synchronously within the current request."""
+    pipeline = getattr(request.app.state, "pipeline", None)
+    while not queue.empty():
+        job = queue.get_nowait()
+        try:
+            if pipeline is not None:
+                await pipeline.execute_job(job)
+        except Exception:
+            logger.exception(
+                "Inline pipeline execution failed for %s",
+                getattr(job, "delivery_id", "unknown"),
+            )
+        finally:
+            queue.task_done()
 
 
 @router.get("/status/{delivery_id}")

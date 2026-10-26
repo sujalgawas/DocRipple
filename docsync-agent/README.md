@@ -207,9 +207,9 @@ GITHUB_WEBHOOK_SECRET=docripple-secret
 FRONTEND_URL=http://localhost:5173
 
 # LLM provider
-LLM_BASE_URL=https://api.openai.com/v1
+LLM_BASE_URL=https://openrouter.ai/api/v1
 LLM_API_KEY=your_key_here
-LLM_MODEL=gpt-4o-mini
+LLM_MODEL=qwen/qwen-2.5-coder-32b-instruct
 
 # Storage
 SQLITE_DB_PATH=docsync_context.db

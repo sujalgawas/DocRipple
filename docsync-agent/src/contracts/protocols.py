@@ -6,6 +6,7 @@ from src.contracts.schemas import (
     DocStyleSkill,
     DriftReport,
     OnboardRepoResult,
+    PublishResult,
     RepoMemoryMap,
     WebhookJob,
 )
@@ -71,3 +72,13 @@ class DriftEngineProtocol(Protocol):
         docs: dict[str, str],
         stored_edges: list[CodeDocEdge] | None = None,
     ) -> DriftReport: ...
+
+
+class OrchestratorProtocol(Protocol):
+    """Entry point for running the full LangGraph pipeline."""
+
+    async def run(
+        self,
+        drift_report: DriftReport,
+        full_docs: dict[str, str],
+    ) -> PublishResult: ...

@@ -1,5 +1,7 @@
 """Application settings loaded from environment variables."""
 
+import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,15 +24,29 @@ class AppSettings(BaseSettings):
     GITHUB_WEBHOOK_SECRET: str = "docripple-secret"
     FRONTEND_URL: str = "http://localhost:5173"
     ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
-    LLM_BASE_URL: str = "https://api.openai.com/v1"
+    LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
     LLM_API_KEY: str = "dev-key"
-    LLM_MODEL: str = "gpt-4o-mini"
-    SQLITE_DB_PATH: str = "docsync_context.db"
-    CHECKPOINT_DB_PATH: str = ":memory:"
+    LLM_MODEL: str = "qwen/qwen-2.5-coder-32b-instruct"
 
-    # Local embedding backend: "tfidf" keeps the Render free tier under 512 MB.
+    # Vercel mounts the deployment bundle at the read-only /var/task path, so
+    # SQLite must live on the writable /tmp mount instead.
+    SQLITE_DB_PATH: str = (
+        "/tmp/docsync_context.db" if os.getenv("VERCEL") else "docsync_context.db"
+    )
+    CHECKPOINT_DB_PATH: str = (
+        "/tmp/docsync_checkpoints.db" if os.getenv("VERCEL") else ":memory:"
+    )
+
+    # Local embedding backend: "tfidf" keeps the Vercel function bundle and
+    # Render free tier well under their memory limits.
     # Set to "fastembed" only when the optional fastembed extra is installed.
     EMBEDDING_MODE: str = "tfidf"
+
+    # Job execution strategy. "inline" runs each job inside the request that
+    # enqueued it, so Vercel Functions never leave work stranded in a queue
+    # that freezes once the response is returned. Set to "queue" on a
+    # long-running host (Render/Fly) to use the background worker instead.
+    EXECUTION_MODE: str = "inline" if os.getenv("VERCEL") else "inline"  # noqa: RUF034
 
     # Runtime / Observability
     LOG_LEVEL: str = "INFO"

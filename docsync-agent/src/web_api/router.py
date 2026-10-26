@@ -67,6 +67,18 @@ def _get_github_service(request: Request) -> GitHubService:
     return service
 
 
+def _propagate_github_token(request: Request, token: str) -> None:
+    """Keep every long-lived GitHub client on the current runtime token."""
+    service = _get_github_service(request)
+    service.token = token
+    request.app.state.github_oauth_token = token
+
+    pipeline = getattr(request.app.state, "pipeline", None)
+    fetcher = getattr(pipeline, "fetcher", None) if pipeline is not None else None
+    if fetcher is not None and hasattr(fetcher, "token"):
+        fetcher.token = token
+
+
 def _require_github_token(service: GitHubService) -> None:
     if not service.token:
         raise HTTPException(
@@ -202,14 +214,8 @@ async def auth_with_token(payload: TokenAuthRequest, request: Request) -> dict:
             detail="Invalid GitHub token or bad credentials.",
         ) from exc
 
-    app_service = _get_github_service(request)
-    app_service.token = token
-    request.app.state.github_oauth_token = token
+    _propagate_github_token(request, token)
     settings.GITHUB_TOKEN = token
-
-    pipeline = getattr(request.app.state, "pipeline", None)
-    if pipeline is not None and hasattr(pipeline, "fetcher"):
-        pipeline.fetcher.token = token
 
     await _get_store(request).update_user_settings(
         github_username=user["login"]
@@ -300,8 +306,8 @@ async def github_callback(
     service = _get_github_service(request)
     try:
         token = await service.exchange_oauth_code(code, redirect_uri or None)
-        service.token = token
-        request.app.state.github_oauth_token = token
+        _propagate_github_token(request, token)
+        settings.GITHUB_TOKEN = token
         user = await service.get_authenticated_user()
         await _get_store(request).update_user_settings(
             github_username=user["login"]
@@ -720,13 +726,21 @@ async def trigger_repo(
         author=commit.get("author", ""),
     )
 
-    queue = getattr(request.app.state, "webhook_queue", None)
-    if queue is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Pipeline queue is not configured.",
-        )
-    await queue.put(job)
+    inline_execution = bool(getattr(request.app.state, "inline_execution", False))
+    pipeline = getattr(request.app.state, "pipeline", None)
+
+    if inline_execution and pipeline is not None:
+        # Vercel freezes background work after the response, so execute the
+        # pipeline inside this request (bounded by the 60s function timeout).
+        await pipeline.execute_job(job)
+    else:
+        queue = getattr(request.app.state, "webhook_queue", None)
+        if queue is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Pipeline queue is not configured.",
+            )
+        await queue.put(job)
 
     return {
         "status": "enqueued",
@@ -833,4 +847,3 @@ def _is_same_commit(sha1: str | None, sha2: str | None) -> bool:
     s1 = sha1.strip().lower()
     s2 = sha2.strip().lower()
     return s1 == s2 or s1.startswith(s2) or s2.startswith(s1)
-
