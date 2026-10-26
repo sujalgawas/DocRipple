@@ -194,14 +194,74 @@ export interface ConnectRepoResponse {
 }
 
 export interface TriggerResponse {
-  status: "enqueued";
+  status: "enqueued" | "already_running" | "already_synced";
+  message?: string;
   delivery_id: string;
   repo_full_name: string;
   commit_sha: string;
-  base_sha: string;
-  commit_message: string;
-  author: string;
+  base_sha?: string;
+  commit_message?: string;
+  author?: string;
   branch: string;
+}
+
+export interface RepoHistoryItem {
+  id: string;
+  type: "commit" | "run";
+  sha: string;
+  full_sha?: string;
+  title: string;
+  message: string;
+  author: string;
+  avatar_url?: string;
+  date: string;
+  html_url?: string;
+  status: "synced" | "running" | "no_drift" | "pr_open" | "merged" | "failed";
+  status_label: string;
+  doc: string;
+  pr_number?: number | null;
+  pr_url?: string | null;
+  has_pipeline_run: boolean;
+}
+
+export interface RepoPullRequest {
+  number: number;
+  title: string;
+  state: string;
+  merged: boolean;
+  html_url: string;
+  created_at: string;
+  updated_at: string;
+  author: string;
+  avatar_url?: string;
+  head_branch: string;
+  base_branch: string;
+}
+
+export interface RepoHistoryResponse {
+  repo_full_name: string;
+  watch_branch: string;
+  stats: {
+    total_commits: number;
+    total_runs: number;
+    pull_requests_count: number;
+    status: string;
+  };
+  latest_commit_sha: string;
+  latest_run_sha: string;
+  latest_run_status: string;
+  is_latest_synced: boolean;
+  is_latest_running: boolean;
+  history: RepoHistoryItem[];
+  pull_requests: RepoPullRequest[];
+  commits: Array<{
+    sha: string;
+    message: string;
+    author: string;
+    avatar_url: string;
+    date: string;
+    html_url: string;
+  }>;
 }
 
 export interface UserSettings {
@@ -310,16 +370,30 @@ export function getActivity(repoFullName?: string): Promise<{ runs: ActivityRun[
   return request<{ runs: ActivityRun[] }>(`/api/v1/activity${query}`);
 }
 
+export function getRepoHistory(
+  owner: string,
+  repo: string
+): Promise<RepoHistoryResponse> {
+  return request<RepoHistoryResponse>(
+    `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/history`
+  );
+}
+
 export function triggerRepo(
   owner: string,
   repo: string,
-  commitSha?: string
+  commitSha?: string,
+  options?: { force?: boolean; checkDuplicate?: boolean }
 ): Promise<TriggerResponse> {
   return request<TriggerResponse>(
     `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/trigger`,
     {
       method: "POST",
-      body: JSON.stringify(commitSha ? { commit_sha: commitSha } : {}),
+      body: JSON.stringify({
+        ...(commitSha ? { commit_sha: commitSha } : {}),
+        ...(options?.force ? { force: true } : {}),
+        ...(options?.checkDuplicate ? { check_duplicate: true } : {}),
+      }),
     }
   );
 }

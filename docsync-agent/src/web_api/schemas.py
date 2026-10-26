@@ -24,6 +24,8 @@ class TriggerRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     commit_sha: str | None = None
+    force: bool = False
+    check_duplicate: bool = False
 
 
 class SettingsPatch(BaseModel):

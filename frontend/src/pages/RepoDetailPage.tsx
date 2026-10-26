@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import {
   GitBranch,
@@ -12,73 +12,79 @@ import {
   Search,
   ExternalLink,
   Loader2,
-  X,
-  ShieldCheck,
   RefreshCw,
   AlertCircle,
+  GitCommit,
+  CheckCircle2,
 } from "lucide-react";
 import {
   getRepoSkill,
   getRepoMemory,
-  executeDemoRun,
   getActivity,
   getDashboard,
+  getRepoHistory,
   triggerRepo,
+  executeDemoRun,
 } from "../services/api";
 import type {
   DocStyleSkill,
   RepoMemoryMap,
-  DemoRunResponse,
   ActivityRun,
   MonitoredRepo,
-  RunStatus,
+  DemoRunResponse,
+  RepoHistoryResponse,
+  RepoHistoryItem,
 } from "../services/api";
 
 const STATUS_META: Record<
-  RunStatus,
+  string,
   { label: string; pill: string; dot: string }
 > = {
   running: {
     label: "running",
-    pill: "border-amber-500/30 bg-amber-500/10 text-amber-300",
-    dot: "bg-amber-400",
+    pill: "border-amber-500/40 bg-amber-500/10 text-amber-300",
+    dot: "bg-amber-400 animate-pulse",
   },
   no_drift: {
     label: "no drift",
     pill: "border-[#26231D] bg-[#1F1D18] text-[#8E897F]",
     dot: "bg-[#8E897F]",
   },
+  synced: {
+    label: "synced",
+    pill: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400",
+    dot: "bg-emerald-400",
+  },
   pr_open: {
     label: "PR open",
-    pill: "border-accent-orange/30 bg-accent-orange/10 text-accent-orange",
+    pill: "border-accent-orange/40 bg-accent-orange/10 text-accent-orange",
     dot: "bg-accent-orange",
   },
   merged: {
     label: "merged",
-    pill: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400",
+    pill: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400",
     dot: "bg-emerald-400",
   },
   failed: {
     label: "failed",
-    pill: "border-red-500/30 bg-red-500/10 text-red-400",
+    pill: "border-red-500/40 bg-red-500/10 text-red-300",
     dot: "bg-red-400",
   },
 };
 
-function relativeTime(value?: string | null): string {
+function formatRelativeTime(value?: string): string {
   if (!value) return "just now";
-  const timestamp = new Date(value).getTime();
-  if (Number.isNaN(timestamp)) return "just now";
-
-  const seconds = Math.max(1, Math.floor((Date.now() - timestamp) / 1000));
+  const delta = Date.now() - new Date(value).getTime();
+  if (Number.isNaN(delta)) return "recently";
+  const seconds = Math.max(1, Math.floor(delta / 1000));
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
+  if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   if (days === 1) return "yesterday";
-  if (days < 7) return `${days} days ago`;
+  if (days < 7) return `${days}d ago`;
   return new Date(value).toLocaleDateString();
 }
 
@@ -88,11 +94,12 @@ export const RepoDetailPage: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<"overview" | "skill" | "memory">("overview");
 
-  // Overview: real pipeline runs and repository metadata
+  // Overview: real GitHub history + pipeline runs + repository metadata
   const [runs, setRuns] = useState<ActivityRun[]>([]);
+  const [repoHistory, setRepoHistory] = useState<RepoHistoryResponse | null>(null);
   const [monitoredRepo, setMonitoredRepo] = useState<MonitoredRepo | null>(null);
-  const [loadingRuns, setLoadingRuns] = useState(true);
-  const [runsError, setRunsError] = useState<string | null>(null);
+  const [loadingData, setLoadingData] = useState(true);
+  const [errorNotice, setErrorNotice] = useState<string | null>(null);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
 
@@ -118,23 +125,30 @@ export const RepoDetailPage: React.FC = () => {
   const [simResult, setSimResult] = useState<DemoRunResponse | null>(null);
   const [simError, setSimError] = useState<string | null>(null);
 
-  const loadRuns = useCallback(
+  // Load Overview Data from real GitHub API & DocRipple Backend
+  const loadData = useCallback(
     async (silent = false) => {
-      if (!silent) setLoadingRuns(true);
+      if (!silent) setLoadingData(true);
 
-      const [activityResult, dashboardResult] = await Promise.allSettled([
-        getActivity(repoFullName),
-        getDashboard(),
-      ]);
+      const [historyResult, activityResult, dashboardResult] =
+        await Promise.allSettled([
+          getRepoHistory(owner, repo),
+          getActivity(repoFullName),
+          getDashboard(),
+        ]);
+
+      if (historyResult.status === "fulfilled") {
+        setRepoHistory(historyResult.value);
+      }
 
       if (activityResult.status === "fulfilled") {
         setRuns(activityResult.value.runs);
-        setRunsError(null);
-      } else {
-        setRunsError(
-          activityResult.reason instanceof Error
-            ? activityResult.reason.message
-            : "Could not load execution history"
+        setErrorNotice(null);
+      } else if (historyResult.status === "rejected") {
+        setErrorNotice(
+          historyResult.reason instanceof Error
+            ? historyResult.reason.message
+            : "Could not load repository history"
         );
       }
 
@@ -146,26 +160,27 @@ export const RepoDetailPage: React.FC = () => {
         );
       }
 
-      if (!silent) setLoadingRuns(false);
+      if (!silent) setLoadingData(false);
     },
-    [repoFullName]
+    [owner, repo, repoFullName]
   );
 
   useEffect(() => {
-    void loadRuns();
-  }, [loadRuns]);
+    void loadData();
+  }, [loadData]);
 
   const hasRunning = runs.some((run) => run.status === "running");
 
+  // Auto-refresh when a run is active
   useEffect(() => {
     const timer = window.setInterval(
       () => {
-        void loadRuns(true);
+        void loadData(true);
       },
-      hasRunning ? 4000 : 15000
+      hasRunning ? 3500 : 20000
     );
     return () => window.clearInterval(timer);
-  }, [hasRunning, loadRuns]);
+  }, [hasRunning, loadData]);
 
   // Load Tab 2 data
   useEffect(() => {
@@ -195,21 +210,147 @@ export const RepoDetailPage: React.FC = () => {
     }
   };
 
-  const handleSyncLatest = async () => {
-    setSyncing(true);
-    setRunsError(null);
+function isSameCommit(shaA?: string | null, shaB?: string | null): boolean {
+  if (!shaA || !shaB) return false;
+  const a = shaA.trim().toLowerCase();
+  const b = shaB.trim().toLowerCase();
+  return a === b || a.startsWith(b) || b.startsWith(a);
+}
+
+function getItemSha(
+  item: ActivityRun | RepoHistoryItem | null | undefined
+): string {
+  if (!item) return "";
+  if ("commit_sha" in item && typeof item.commit_sha === "string") {
+    return item.commit_sha;
+  }
+  if ("sha" in item && typeof item.sha === "string") {
+    return item.sha;
+  }
+  return "";
+}
+
+function getItemStatus(
+  item: ActivityRun | RepoHistoryItem | null | undefined
+): string {
+  if (!item) return "";
+  return String(item.status || "");
+}
+
+// ── Sync / Trigger Handler with edge case checks ───────────────────────────
+  const handleSyncLatest = async (targetCommitSha?: string) => {
+    setErrorNotice(null);
     setSyncNotice(null);
+
+    // Commit to sync: either explicit target or latest commit from GitHub API
+    const latestGitHubSha =
+      repoHistory?.latest_commit_sha ||
+      (repoHistory?.commits?.[0]?.sha ?? "").slice(0, 7);
+    const shaToSync = (
+      targetCommitSha ? targetCommitSha.slice(0, 7) : latestGitHubSha
+    ).trim();
+
+    // Latest run in execution history (check runs first, then history list)
+    const latestRunInHistory =
+      runs[0] ||
+      repoHistory?.history?.find(
+        (h) => h.has_pipeline_run || h.type === "run"
+      ) ||
+      null;
+
+    const currentLatestRunSha = (
+      getItemSha(latestRunInHistory) ||
+      repoHistory?.latest_run_sha ||
+      ""
+    ).slice(0, 7);
+
+    const currentLatestRunStatus =
+      getItemStatus(latestRunInHistory) || repoHistory?.latest_run_status || "";
+
+    // ── Apply IF / ELSE checks to prevent redundant/duplicate syncing ──
+    if (
+      shaToSync &&
+      currentLatestRunSha &&
+      isSameCommit(shaToSync, currentLatestRunSha)
+    ) {
+      // IF: The commit being checked is the same as the latest run commit in history
+      if (
+        currentLatestRunStatus === "running" ||
+        syncing ||
+        runs.some((r) => r.status === "running") ||
+        Boolean(repoHistory?.is_latest_running)
+      ) {
+        // Sub-case 1: The same latest commit is currently syncing / running
+        setSyncNotice(
+          `Commit ${shaToSync} is currently syncing. Please wait for the current analysis to finish.`
+        );
+        return;
+      } else if (
+        currentLatestRunStatus === "no_drift" ||
+        currentLatestRunStatus === "synced"
+      ) {
+        // Sub-case 2: The same latest commit has already been synced with no documentation drift
+        setSyncNotice(
+          `Commit ${shaToSync} has already been synced with no documentation drift. Your docs are already up to date!`
+        );
+        return;
+      } else if (
+        currentLatestRunStatus === "pr_open" ||
+        currentLatestRunStatus === "merged"
+      ) {
+        // Sub-case 3: The same latest commit already produced a PR
+        setSyncNotice(
+          `Commit ${shaToSync} has already been analyzed and a documentation PR is already ${
+            currentLatestRunStatus === "pr_open" ? "open" : "merged"
+          }.`
+        );
+        return;
+      }
+      // Sub-case 4: Previous run failed; allow retry by proceeding to sync
+    } else {
+      // ELSE: It's a new or different commit from the latest run in history
+      const anyRunning =
+        syncing ||
+        runs.some((r) => r.status === "running") ||
+        Boolean(repoHistory?.is_latest_running);
+
+      if (anyRunning) {
+        setSyncNotice(
+          `A drift analysis is currently running. Please wait for it to complete before syncing commit ${shaToSync || "latest"}.`
+        );
+        return;
+      }
+    }
+
+    // Proceed to sync / trigger the commit
+    setSyncing(true);
     try {
-      const result = await triggerRepo(owner, repo);
-      setSyncNotice(
-        `Queued ${result.commit_sha.slice(0, 7)} on ${result.branch}. History refreshes as the run progresses.`
-      );
+      const result = await triggerRepo(owner, repo, shaToSync || undefined, {
+        checkDuplicate: true,
+      });
+
+      if (result.status === "already_running") {
+        setSyncNotice(
+          result.message ||
+            `Commit ${shaToSync} is currently syncing. Please wait for it to finish.`
+        );
+      } else if (result.status === "already_synced") {
+        setSyncNotice(
+          result.message ||
+            `Commit ${shaToSync} has already been synced with no further drift detected.`
+        );
+      } else {
+        setSyncNotice(
+          `Queued ${result.commit_sha.slice(0, 7)} on ${result.branch}. Drift analysis is now running.`
+        );
+      }
+
       window.setTimeout(() => {
-        void loadRuns(true);
+        void loadData(true);
       }, 1500);
     } catch (err) {
-      setRunsError(
-        err instanceof Error ? err.message : "Could not sync the latest commit"
+      setErrorNotice(
+        err instanceof Error ? err.message : "Could not sync commit"
       );
     } finally {
       setSyncing(false);
@@ -237,18 +378,97 @@ export const RepoDetailPage: React.FC = () => {
     }
   };
 
-  const totalRuns = runs.length;
-  const noDriftRuns = runs.filter((run) => run.status === "no_drift").length;
-  const docsPrs = runs.filter(
-    (run) => run.pr_number !== null || Boolean(run.pr_url)
-  ).length;
-  const totalLlmCalls = runs.reduce(
-    (sum, run) => sum + (run.llm_calls ?? 0),
-    0
-  );
-  const watchBranch = monitoredRepo?.watch_branch ?? "main";
+  // Metric computation from real GitHub API + DocRipple context store
+  const totalCommitsCount =
+    repoHistory?.stats?.total_commits ?? repoHistory?.commits?.length ?? 0;
+  const totalRunsCount = runs.length;
+  const totalPrsCount =
+    repoHistory?.stats?.pull_requests_count ??
+    repoHistory?.pull_requests?.length ??
+    runs.filter((r) => r.pr_number !== null).length;
+  const watchBranch =
+    repoHistory?.watch_branch || monitoredRepo?.watch_branch || "main";
   const isListening = monitoredRepo?.status === "listening";
-  const repoStatusLabel = monitoredRepo ? monitoredRepo.status : "not connected";
+  const repoStatusLabel = monitoredRepo ? monitoredRepo.status : "listening";
+
+  // Check state for the top sync button
+  const latestGitHubSha =
+    repoHistory?.latest_commit_sha ||
+    (repoHistory?.commits?.[0]?.sha ?? "").slice(0, 7);
+
+  const latestRun =
+    runs[0] ||
+    repoHistory?.history?.find(
+      (h) => h.has_pipeline_run || h.type === "run"
+    ) ||
+    null;
+
+  const latestRunSha = (
+    getItemSha(latestRun) ||
+    repoHistory?.latest_run_sha ||
+    ""
+  ).slice(0, 7);
+
+  const latestRunStatus =
+    getItemStatus(latestRun) || repoHistory?.latest_run_status || "";
+
+  const isSameAsLatestRun = Boolean(
+    latestGitHubSha &&
+      latestRunSha &&
+      isSameCommit(latestGitHubSha, latestRunSha)
+  );
+
+  const isCurrentlySyncing = Boolean(
+    syncing ||
+      hasRunning ||
+      repoHistory?.is_latest_running ||
+      (isSameAsLatestRun && latestRunStatus === "running") ||
+      repoHistory?.history?.some((h) => h.status === "running")
+  );
+
+  const isUpToDate = Boolean(
+    isSameAsLatestRun &&
+      !isCurrentlySyncing &&
+      (latestRunStatus === "no_drift" ||
+        latestRunStatus === "synced" ||
+        latestRunStatus === "pr_open" ||
+        latestRunStatus === "merged" ||
+        repoHistory?.is_latest_synced)
+  );
+
+  // History list from GitHub API & pipeline
+  const displayHistory: RepoHistoryItem[] =
+    repoHistory?.history && repoHistory.history.length > 0
+      ? repoHistory.history
+      : runs.map((run) => ({
+          id: `run-${run.delivery_id}`,
+          type: "run",
+          sha: (run.commit_sha || "").slice(0, 7) || "—",
+          full_sha: run.commit_sha,
+          title:
+            (run.commit_message || "").split("\n")[0].trim() ||
+            `Docs sync at ${(run.commit_sha || "unknown").slice(0, 7)}`,
+          message: run.commit_message || "",
+          author: run.author || owner,
+          avatar_url: "",
+          date: run.created_at,
+          html_url: run.commit_sha
+            ? `https://github.com/${repoFullName}/commit/${run.commit_sha}`
+            : undefined,
+          status: run.status,
+          status_label:
+            run.status === "no_drift"
+              ? "no drift"
+              : run.status.replace("_", " "),
+          doc:
+            run.diff_preview?.file_path ||
+            (run.status === "no_drift"
+              ? "No doc sections impacted (0 LLM tokens)"
+              : "No doc drift"),
+          pr_number: run.pr_number,
+          pr_url: run.pr_url,
+          has_pipeline_run: true,
+        }));
 
   return (
     <div className="p-8 lg:p-12 max-w-6xl">
@@ -274,14 +494,10 @@ export const RepoDetailPage: React.FC = () => {
               className={`font-mono text-xs px-2 py-0.5 rounded border flex items-center gap-1 ${
                 isListening
                   ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                  : "bg-amber-500/10 text-amber-300 border-amber-500/20"
+                  : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
               }`}
             >
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  isListening ? "bg-emerald-400" : "bg-amber-400"
-                }`}
-              />
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
               {repoStatusLabel}
             </span>
           </div>
@@ -291,21 +507,45 @@ export const RepoDetailPage: React.FC = () => {
           </h1>
         </div>
 
-        {/* Primary Actions */}
+        {/* Primary Action Buttons */}
         <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            disabled={syncing}
-            onClick={() => void handleSyncLatest()}
-            className="bg-accent-orange hover:bg-accent-orange-hover text-black font-medium px-4 py-2.5 rounded-lg text-sm flex items-center gap-2 transition-colors shadow-sm font-sans disabled:opacity-60"
-          >
-            {syncing ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
+          {/* Sync Latest Commit Button with Edge-Case Protection */}
+          {isCurrentlySyncing ? (
+            <button
+              type="button"
+              disabled
+              className="border border-[#26231D] bg-[#1F1D18] text-[#8E897F] font-medium px-4 py-2.5 rounded-lg text-sm flex items-center gap-2 cursor-not-allowed font-sans"
+            >
+              <Loader2 className="w-4 h-4 animate-spin text-accent-orange" />
+              <span>
+                Syncing {latestGitHubSha ? `(${latestGitHubSha})` : ""}...
+              </span>
+            </button>
+          ) : isUpToDate ? (
+            <button
+              type="button"
+              onClick={() => void handleSyncLatest()}
+              className="border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 font-medium px-4 py-2.5 rounded-lg text-sm flex items-center gap-2 transition-colors font-sans shadow-sm"
+              title="Latest commit has already been analyzed and verified up to date."
+            >
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <span>Up to date ({latestGitHubSha})</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={syncing}
+              onClick={() => void handleSyncLatest()}
+              className="bg-accent-orange hover:bg-accent-orange-hover text-black font-medium px-4 py-2.5 rounded-lg text-sm flex items-center gap-2 transition-colors shadow-sm font-sans active:scale-[0.99]"
+            >
               <RefreshCw className="w-4 h-4" />
-            )}
-            <span>{syncing ? "Syncing..." : "Sync latest commit"}</span>
-          </button>
+              <span>
+                Sync latest commit{" "}
+                {latestGitHubSha ? `(${latestGitHubSha})` : ""}
+              </span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => setShowSimulateModal(true)}
@@ -317,22 +557,33 @@ export const RepoDetailPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Sync / Edge-case notification toast */}
       {syncNotice && (
-        <div className="mb-6 border border-emerald-900/50 bg-emerald-950/20 text-emerald-300 rounded-xl px-4 py-3 text-sm flex items-start gap-2">
-          <Check className="w-4 h-4 mt-0.5 shrink-0" />
-          <span>{syncNotice}</span>
-        </div>
-      )}
-
-      {runsError && (
-        <div className="mb-6 border border-red-900/50 bg-red-950/20 text-red-300 rounded-xl px-4 py-3 text-sm flex items-start justify-between gap-3">
-          <div className="flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-            <span>{runsError}</span>
+        <div className="mb-6 border border-emerald-900/50 bg-emerald-950/25 text-emerald-300 rounded-xl px-4 py-3 text-sm flex items-start justify-between gap-3 shadow-md animate-fadeIn">
+          <div className="flex items-start gap-2.5">
+            <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0 text-emerald-400" />
+            <span>{syncNotice}</span>
           </div>
           <button
             type="button"
-            onClick={() => void loadRuns()}
+            onClick={() => setSyncNotice(null)}
+            className="font-mono text-xs opacity-60 hover:opacity-100"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Error alert banner */}
+      {errorNotice && (
+        <div className="mb-6 border border-red-900/50 bg-red-950/20 text-red-300 rounded-xl px-4 py-3 text-sm flex items-start justify-between gap-3">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{errorNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadData()}
             className="font-mono text-xs underline hover:text-[#F5F2EB] shrink-0"
           >
             retry
@@ -352,7 +603,7 @@ export const RepoDetailPage: React.FC = () => {
           }`}
         >
           <History className="w-3.5 h-3.5" />
-          <span>Overview &amp; Runs</span>
+          <span>Overview &amp; Real GitHub History</span>
         </button>
 
         <button
@@ -385,171 +636,184 @@ export const RepoDetailPage: React.FC = () => {
       {/* ── TAB 1: OVERVIEW & RUNS ────────────────────────────────────────── */}
       {activeTab === "overview" && (
         <div className="flex flex-col gap-8">
-          {/* Metrics */}
+          {/* Real Metrics Strip backed by GitHub API & SQLite */}
           <div className="grid grid-cols-1 sm:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-[#26231D] border border-[#26231D] rounded-xl bg-[#141310] overflow-hidden">
             <div className="p-4">
-              <span className="font-mono text-xs text-[#8E897F] block mb-1">Total Runs</span>
+              <span className="font-mono text-xs text-[#8E897F] block mb-1">
+                GitHub Commits
+              </span>
               <span className="font-serif text-3xl text-[#F5F2EB]">
-                {loadingRuns && runs.length === 0 ? "…" : totalRuns}
+                {loadingData && !repoHistory ? "…" : totalCommitsCount}
               </span>
             </div>
             <div className="p-4">
-              <span className="font-mono text-xs text-[#8E897F] block mb-1">No Drift (0 tokens)</span>
-              <span className="font-serif text-3xl text-[#F5F2EB]">{noDriftRuns}</span>
+              <span className="font-mono text-xs text-[#8E897F] block mb-1">
+                Pipeline Runs
+              </span>
+              <span className="font-serif text-3xl text-[#F5F2EB]">
+                {totalRunsCount}
+              </span>
             </div>
             <div className="p-4">
-              <span className="font-mono text-xs text-[#8E897F] block mb-1">Documentation PRs</span>
-              <span className="font-serif text-3xl text-[#F5F2EB]">{docsPrs}</span>
+              <span className="font-mono text-xs text-[#8E897F] block mb-1">
+                Documentation PRs
+              </span>
+              <span className="font-serif text-3xl text-[#F5F2EB]">
+                {totalPrsCount}
+              </span>
             </div>
             <div className="p-4">
-              <span className="font-mono text-xs text-[#8E897F] block mb-1">LLM Calls</span>
-              <span className="font-serif text-3xl text-emerald-400">{totalLlmCalls}</span>
+              <span className="font-mono text-xs text-[#8E897F] block mb-1">
+                Watch Branch
+              </span>
+              <span className="font-serif text-3xl text-emerald-400">
+                {watchBranch}
+              </span>
             </div>
           </div>
 
-          {/* Runs history */}
+          {/* Real Execution History from GitHub API */}
           <div>
             <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
               <div>
-                <h2 className="font-serif text-2xl text-[#F5F2EB]">Execution History</h2>
+                <h2 className="font-serif text-2xl text-[#F5F2EB]">
+                  Execution History
+                </h2>
                 <p className="font-mono text-xs text-[#8E897F] mt-1">
-                  Real pipeline runs for {repoFullName}
+                  Live commits and AST drift analysis for {repoFullName}
                   {hasRunning ? " · live polling" : ""}
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => void loadRuns()}
+                onClick={() => void loadData()}
                 className="border border-[#26231D] bg-[#1F1D18] hover:bg-[#2A2720] text-[#F5F2EB] px-3 py-1.5 rounded-lg text-xs font-mono flex items-center gap-1.5 transition-colors"
               >
                 <RefreshCw
-                  className={`w-3.5 h-3.5 ${loadingRuns ? "animate-spin" : ""}`}
+                  className={`w-3.5 h-3.5 ${loadingData ? "animate-spin" : ""}`}
                 />
-                <span>Refresh</span>
+                <span>Refresh GitHub</span>
               </button>
             </div>
 
-            {loadingRuns ? (
-              <div className="border border-[#26231D] bg-[#141310] rounded-xl p-6 flex items-center gap-2 text-xs font-mono text-[#8E897F]">
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Loading execution history...</span>
+            {loadingData && displayHistory.length === 0 ? (
+              <div className="border border-[#26231D] bg-[#141310] rounded-xl p-8 flex items-center justify-center gap-2 text-xs font-mono text-[#8E897F]">
+                <Loader2 className="w-4 h-4 animate-spin text-accent-orange" />
+                <span>Fetching real commits from GitHub API...</span>
               </div>
-            ) : runs.length === 0 ? (
+            ) : displayHistory.length === 0 ? (
               <div className="border border-dashed border-[#26231D] rounded-xl p-8 text-center">
+                <GitCommit className="w-8 h-8 mx-auto text-[#8E897F] mb-3 opacity-60" />
                 <p className="text-sm text-[#8E897F] mb-1">
-                  No pipeline runs for this repository yet.
+                  No commits found on {watchBranch}.
                 </p>
                 <p className="font-mono text-xs text-[#8E897F]/70 mb-4">
-                  Sync the latest GitHub commit to start the first run.
+                  Push a commit to GitHub to see it appear here.
                 </p>
-                <button
-                  type="button"
-                  disabled={syncing}
-                  onClick={() => void handleSyncLatest()}
-                  className="bg-accent-orange hover:bg-accent-orange-hover text-black font-medium px-4 py-2 rounded-lg text-sm inline-flex items-center gap-2 transition-colors disabled:opacity-60"
-                >
-                  {syncing ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="w-4 h-4" />
-                  )}
-                  <span>{syncing ? "Syncing..." : "Sync latest commit"}</span>
-                </button>
               </div>
             ) : (
               <div className="flex flex-col gap-3">
-                {runs.map((run) => {
-                  const status = STATUS_META[run.status];
-                  const symbols = run.diff_preview?.changed_symbols ?? [];
-                  const sections = run.diff_preview?.impacted_sections ?? [];
-                  const title =
-                    (run.commit_message || "").split("\n")[0].trim() ||
-                    `Docs sync at ${(run.commit_sha || "unknown").slice(0, 7)}`;
-                  const docTarget =
-                    sections.length > 0
-                      ? `${sections[0].doc_path} # ${sections[0].heading}${
-                          sections.length > 1
-                            ? ` +${sections.length - 1} more`
-                            : ""
-                        }`
-                      : run.status === "no_drift"
-                      ? "No doc sections impacted (0 LLM tokens)"
-                      : "No doc sections impacted";
-                  const shortSha = run.commit_sha
-                    ? run.commit_sha.slice(0, 7)
-                    : "—";
+                {displayHistory.map((item) => {
+                  const statusInfo =
+                    STATUS_META[item.status] || STATUS_META.synced;
+                  const shortSha = item.sha || "—";
+                  const isItemRunning =
+                    item.status === "running" ||
+                    (syncing && shortSha === latestGitHubSha);
 
                   return (
                     <div
-                      key={run.delivery_id}
-                      className="border border-[#26231D] bg-[#141310] rounded-xl p-5 flex flex-col gap-3"
+                      key={item.id}
+                      className="border border-[#26231D] bg-[#141310] hover:border-[#3A352C] rounded-xl p-5 flex flex-col gap-3 transition-colors"
                     >
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                         <div className="flex items-start sm:items-center gap-3 min-w-0">
+                          {/* Status Pill */}
                           <span
-                            className={`px-2 py-0.5 rounded-full text-xs font-mono border flex items-center gap-1.5 shrink-0 ${status.pill}`}
+                            className={`px-2.5 py-0.5 rounded-full text-xs font-mono border flex items-center gap-1.5 shrink-0 ${statusInfo.pill}`}
                           >
                             <span
-                              className={`w-1.5 h-1.5 rounded-full ${status.dot}`}
+                              className={`w-1.5 h-1.5 rounded-full ${statusInfo.dot}`}
                             />
-                            {status.label}
+                            {item.status_label}
                           </span>
+
+                          {/* Commit / Run Title */}
                           <span className="text-sm font-medium text-[#F5F2EB] truncate">
-                            {title}
+                            {item.title}
                           </span>
                         </div>
-                        <span className="font-mono text-xs text-[#8E897F] shrink-0">
-                          {run.llm_calls ?? 0} LLM calls ·{" "}
-                          {relativeTime(run.created_at)}
-                        </span>
+
+                        {/* Author & Timestamp */}
+                        <div className="flex items-center gap-2 font-mono text-xs text-[#8E897F] shrink-0">
+                          {item.avatar_url ? (
+                            <img
+                              src={item.avatar_url}
+                              alt={item.author}
+                              className="w-4 h-4 rounded-full border border-[#26231D]"
+                            />
+                          ) : null}
+                          <span>@{item.author}</span>
+                          <span>·</span>
+                          <span>{formatRelativeTime(item.date)}</span>
+                        </div>
                       </div>
 
+                      {/* Bottom row: AST / Doc impact + Actions */}
                       <div className="flex flex-wrap items-center justify-between gap-4 text-xs font-mono pt-2 border-t border-[#26231D]/60 text-[#8E897F]">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span>Changed AST:</span>
-                          {symbols.length > 0 ? (
-                            symbols.map((symbol, index) => (
-                              <span
-                                key={`${symbol.symbol_name}-${index}`}
-                                className="bg-[#1F1D18] text-[#F5F2EB] px-2 py-0.5 rounded border border-[#26231D]"
-                              >
-                                {symbol.symbol_name} ({symbol.change_class})
-                              </span>
-                            ))
-                          ) : (
-                            <span className="text-[#8E897F]/70">
-                              no public symbols
-                            </span>
-                          )}
-                          <span>→</span>
-                          <span className="text-accent-orange">{docTarget}</span>
+                          <span className="text-[#8E897F]/70">Target:</span>
+                          <span className="text-accent-orange font-medium">
+                            {item.doc}
+                          </span>
                         </div>
 
                         <div className="flex items-center gap-3">
-                          {run.commit_sha && (
+                          {/* GitHub Commit Link */}
+                          {item.html_url && (
                             <a
-                              href={`https://github.com/${run.repo_full_name}/commit/${run.commit_sha}`}
+                              href={item.html_url}
                               target="_blank"
                               rel="noreferrer"
                               className="inline-flex items-center gap-1 text-[#8E897F] hover:text-[#F5F2EB] transition-colors"
-                              title={run.commit_sha}
+                              title={`View commit ${item.full_sha || item.sha} on GitHub`}
                             >
+                              <GitCommit className="w-3.5 h-3.5" />
                               <span>{shortSha}</span>
                               <ExternalLink className="w-3 h-3" />
                             </a>
                           )}
-                          {run.author && <span>@{run.author}</span>}
-                          {run.pr_number && run.pr_url && (
+
+                          {/* Documentation PR Link */}
+                          {item.pr_number && item.pr_url && (
                             <a
-                              href={run.pr_url}
+                              href={item.pr_url}
                               target="_blank"
                               rel="noreferrer"
-                              className="inline-flex items-center gap-1.5 text-accent-orange hover:text-accent-orange-hover"
+                              className="inline-flex items-center gap-1.5 text-accent-orange hover:text-accent-orange-hover font-semibold"
                             >
                               <GitPullRequest className="w-3.5 h-3.5" />
-                              <span>Docs PR #{run.pr_number}</span>
+                              <span>Docs PR #{item.pr_number}</span>
                               <ExternalLink className="w-3 h-3" />
                             </a>
+                          )}
+
+                          {/* Per-Commit Sync/Rerun Action Button */}
+                          {isItemRunning ? (
+                            <span className="text-amber-400 font-mono text-xs flex items-center gap-1">
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              syncing...
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => void handleSyncLatest(shortSha)}
+                              className="text-xs px-2.5 py-1 rounded border border-[#26231D] hover:border-accent-orange/50 hover:text-[#F5F2EB] bg-[#0D0C0A] transition-colors inline-flex items-center gap-1 active:scale-[0.98]"
+                              title={`Run documentation drift check on commit ${shortSha}`}
+                            >
+                              <RefreshCw className="w-3 h-3 text-[#8E897F]" />
+                              <span>Check drift</span>
+                            </button>
                           )}
                         </div>
                       </div>
@@ -566,11 +830,15 @@ export const RepoDetailPage: React.FC = () => {
       {activeTab === "skill" && (
         <div className="flex flex-col gap-6">
           <div className="border border-[#26231D] bg-[#141310] rounded-xl p-6">
-            <h2 className="font-serif text-2xl text-[#F5F2EB] mb-2">Stage 0 Writing Style Extraction</h2>
+            <h2 className="font-serif text-2xl text-[#F5F2EB] mb-2">
+              Stage 0 Writing Style Extraction
+            </h2>
             <p className="text-xs text-[#8E897F] font-mono leading-relaxed">
-              Mined from existing Markdown documents in <code className="text-accent-orange">{repoFullName}</code>. This
-              skill is injected verbatim into LangGraph Writer &amp; Reviewer prompts to prevent hallucinated rewrites and
-              maintain tone consistency.
+              Mined from existing Markdown documents in{" "}
+              <code className="text-accent-orange">{repoFullName}</code>. This
+              skill is injected verbatim into LangGraph Writer &amp; Reviewer
+              prompts to prevent hallucinated rewrites and maintain tone
+              consistency.
             </p>
           </div>
 
@@ -587,7 +855,9 @@ export const RepoDetailPage: React.FC = () => {
                   <span className="font-mono text-xs text-accent-orange font-semibold uppercase tracking-wider">
                     Tone &amp; Voice
                   </span>
-                  <p className="text-xs text-[#F5F2EB] leading-relaxed font-sans">{skill.tone_and_voice}</p>
+                  <p className="text-xs text-[#F5F2EB] leading-relaxed font-sans">
+                    {skill.tone_and_voice}
+                  </p>
                 </div>
 
                 <div className="border border-[#26231D] bg-[#141310] rounded-xl p-5 flex flex-col gap-2">
@@ -596,7 +866,9 @@ export const RepoDetailPage: React.FC = () => {
                   </span>
                   <ul className="text-xs text-[#8E897F] flex flex-col gap-1.5 font-mono list-disc list-inside">
                     {skill.heading_conventions.map((h, i) => (
-                      <li key={i} className="text-[#F5F2EB]">{h}</li>
+                      <li key={i} className="text-[#F5F2EB]">
+                        {h}
+                      </li>
                     ))}
                   </ul>
                 </div>
@@ -607,7 +879,9 @@ export const RepoDetailPage: React.FC = () => {
                   </span>
                   <ul className="text-xs text-[#8E897F] flex flex-col gap-1.5 font-mono list-disc list-inside">
                     {skill.code_block_rules.map((c, i) => (
-                      <li key={i} className="text-[#F5F2EB]">{c}</li>
+                      <li key={i} className="text-[#F5F2EB]">
+                        {c}
+                      </li>
                     ))}
                   </ul>
                 </div>
@@ -625,7 +899,11 @@ export const RepoDetailPage: React.FC = () => {
                     onClick={handleCopySkill}
                     className="inline-flex items-center gap-1.5 font-mono text-xs text-accent-orange hover:text-accent-orange-hover"
                   >
-                    {copiedSkill ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    {copiedSkill ? (
+                      <Check className="w-3.5 h-3.5" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
                     <span>{copiedSkill ? "Copied" : "Copy SKILL.md"}</span>
                   </button>
                 </div>
@@ -643,10 +921,14 @@ export const RepoDetailPage: React.FC = () => {
         <div className="flex flex-col gap-6">
           <div className="border border-[#26231D] bg-[#141310] rounded-xl p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
-              <h2 className="font-serif text-2xl text-[#F5F2EB] mb-1">Stage 0 Repository Memory Graph</h2>
+              <h2 className="font-serif text-2xl text-[#F5F2EB] mb-1">
+                Stage 0 Repository Memory Graph
+              </h2>
               <p className="text-xs text-[#8E897F] font-mono">
-                2-hop node traversal mapping: <span className="text-indigo-400">Module</span> →{" "}
-                <span className="text-sky-400">File</span> → <span className="text-accent-orange">Symbol</span> →{" "}
+                2-hop node traversal mapping:{" "}
+                <span className="text-indigo-400">Module</span> →{" "}
+                <span className="text-sky-400">File</span> →{" "}
+                <span className="text-accent-orange">Symbol</span> →{" "}
                 <span className="text-emerald-400">DocSection</span>.
               </p>
             </div>
@@ -694,13 +976,21 @@ export const RepoDetailPage: React.FC = () => {
                         className="border border-[#26231D] bg-[#0D0C0A] rounded-lg p-3.5 flex flex-col justify-between gap-2"
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <span className={`px-2 py-0.5 rounded text-[10px] border uppercase ${badgeColor}`}>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] border uppercase ${badgeColor}`}
+                          >
                             {node.node_type}
                           </span>
-                          <span className="text-[#8E897F] text-[11px] truncate max-w-[200px]">{node.path}</span>
+                          <span className="text-[#8E897F] text-[11px] truncate max-w-[200px]">
+                            {node.path}
+                          </span>
                         </div>
-                        <p className="text-sm font-semibold text-[#F5F2EB]">{node.name}</p>
-                        <p className="text-[11px] text-[#8E897F] line-clamp-2">{node.summary}</p>
+                        <p className="text-sm font-semibold text-[#F5F2EB]">
+                          {node.name}
+                        </p>
+                        <p className="text-[11px] text-[#8E897F] line-clamp-2">
+                          {node.summary}
+                        </p>
                       </div>
                     );
                   })}
@@ -719,7 +1009,9 @@ export const RepoDetailPage: React.FC = () => {
                       key={idx}
                       className="border border-[#26231D] bg-[#0D0C0A] rounded-lg px-4 py-2.5 flex items-center justify-between text-[#8E897F]"
                     >
-                      <span className="text-[#F5F2EB] truncate max-w-[40%]">{edge.source_id.split("::").pop()}</span>
+                      <span className="text-[#F5F2EB] truncate max-w-[40%]">
+                        {edge.source_id.split("::").pop()}
+                      </span>
                       <span className="px-2 py-0.5 rounded bg-[#1F1D18] text-accent-orange text-[10px] border border-[#26231D]">
                         ── {edge.relation} ──►
                       </span>
@@ -735,134 +1027,147 @@ export const RepoDetailPage: React.FC = () => {
         </div>
       )}
 
-      {/* ── MODAL: SIMULATE DRIFT RUN ────────────────────────────────────── */}
+      {/* ── MODAL: SIMULATE DRIFT RUN ──────────────────────────────────────── */}
       {showSimulateModal && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#141310] border border-[#26231D] rounded-2xl w-full max-w-3xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
-            {/* Header */}
-            <div className="p-6 border-b border-[#26231D] flex items-center justify-between">
-              <div>
-                <h2 className="font-serif text-2xl text-[#F5F2EB]">Simulate End-to-End Drift Run</h2>
-                <p className="text-xs text-[#8E897F] font-mono mt-0.5">
-                  Sends unified diff to Stage 2 (AST) → Stage 3 (Drift) → Stage 4 (LangGraph) → Stage 5 (PR).
-                </p>
+          <div className="border border-[#26231D] bg-[#141310] rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6 sm:p-8 flex flex-col gap-6 shadow-2xl">
+            <div className="flex items-center justify-between pb-4 border-b border-[#26231D]">
+              <div className="flex items-center gap-2">
+                <Play className="w-5 h-5 text-accent-orange fill-current" />
+                <h3 className="font-serif text-2xl text-[#F5F2EB]">
+                  Simulate Drift Run
+                </h3>
               </div>
               <button
                 type="button"
                 onClick={() => setShowSimulateModal(false)}
-                className="text-[#8E897F] hover:text-[#F5F2EB] p-1.5 rounded-lg border border-[#26231D] bg-[#0D0C0A]"
+                className="text-[#8E897F] hover:text-[#F5F2EB] font-mono text-sm"
               >
-                <X className="w-4 h-4" />
+                ✕
               </button>
             </div>
 
-            {/* Content Body */}
-            <div className="p-6 overflow-y-auto flex flex-col gap-5">
-              <div>
-                <label className="block text-xs font-mono text-[#8E897F] mb-1.5 uppercase tracking-wider">
-                  Raw Unified Diff
-                </label>
-                <textarea
-                  rows={4}
-                  value={simDiff}
-                  onChange={(e) => setSimDiff(e.target.value)}
-                  className="w-full bg-[#0D0C0A] border border-[#26231D] focus:border-accent-orange rounded-lg p-3 font-mono text-xs text-[#F5F2EB] outline-none"
-                />
-              </div>
+            <p className="text-xs text-[#8E897F] font-mono leading-relaxed">
+              Feed raw unified diff hunks and doc files directly through the
+              6-stage pipeline to test drift classification, prompt extraction,
+              and evidence table generation without pushing a git commit.
+            </p>
 
-              <div>
-                <label className="block text-xs font-mono text-[#8E897F] mb-1.5 uppercase tracking-wider">
-                  Target Documentation (README.md)
-                </label>
-                <textarea
-                  rows={4}
-                  value={simDoc}
-                  onChange={(e) => setSimDoc(e.target.value)}
-                  className="w-full bg-[#0D0C0A] border border-[#26231D] focus:border-accent-orange rounded-lg p-3 font-mono text-xs text-[#F5F2EB] outline-none"
-                />
-              </div>
-
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  disabled={simLoading}
-                  onClick={handleRunSimulation}
-                  className="bg-accent-orange hover:bg-accent-orange-hover text-black font-medium px-5 py-2.5 rounded-lg text-sm flex items-center gap-2 shadow-sm disabled:opacity-60 font-sans"
-                >
-                  {simLoading ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      <span>Executing 6 Stages...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Play className="w-4 h-4 fill-current stroke-none" />
-                      <span>Run Pipeline Demo</span>
-                    </>
-                  )}
-                </button>
-              </div>
-
-              {simError && (
-                <div className="border border-red-900/50 bg-red-950/20 text-red-300 rounded-xl px-4 py-3 text-xs flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-                  <span>{simError}</span>
-                </div>
-              )}
-
-              {/* Simulation Result */}
-              {simResult && (
-                <div className="border border-emerald-500/30 bg-[#0D0C0A] rounded-xl p-5 flex flex-col gap-4 font-mono text-xs">
-                  <div className="flex items-center justify-between text-emerald-400">
-                    <span className="flex items-center gap-2 font-bold">
-                      <ShieldCheck className="w-4 h-4" />
-                      Pipeline Executed Successfully
-                    </span>
-                    <span className="text-[#8E897F] text-[11px]">{simResult.delivery_id}</span>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[#8E897F]">
-                    <div className="border border-[#26231D] bg-[#141310] p-3 rounded">
-                      <span className="text-accent-orange block mb-1 font-semibold">Stage 2: Changed Symbols</span>
-                      {simResult.change_report.changed_symbols.map((s, i) => (
-                        <p key={i} className="text-[#F5F2EB]">
-                          • {s.symbol_name} ({s.change_class})
-                        </p>
-                      ))}
-                    </div>
-
-                    <div className="border border-[#26231D] bg-[#141310] p-3 rounded">
-                      <span className="text-accent-orange block mb-1 font-semibold">Stage 3: Impacted Sections</span>
-                      {simResult.drift_report.impacted_sections.map((sec, i) => (
-                        <p key={i} className="text-[#F5F2EB]">
-                          • {sec.doc_path} #{sec.heading}
-                        </p>
-                      ))}
-                    </div>
-                  </div>
-
-                  {simResult.publish_result && (
-                    <div className="border border-[#26231D] bg-[#141310] p-3 rounded flex flex-col gap-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-emerald-400 font-semibold">Stage 4–5: Pull Request Opened</span>
-                        <a
-                          href={simResult.publish_result.pr_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-accent-orange hover:underline inline-flex items-center gap-1"
-                        >
-                          <span>PR #{simResult.publish_result.pr_number}</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      </div>
-                      <pre className="text-[11px] text-[#8E897F] overflow-x-auto whitespace-pre-wrap">
-                        {simResult.publish_result.evidence_table_md}
-                      </pre>
-                    </div>
-                  )}
-                </div>
-              )}
+            {/* Diff Input */}
+            <div className="flex flex-col gap-2 font-mono text-xs">
+              <label className="text-[#F5F2EB] font-semibold">
+                Raw Git Diff
+              </label>
+              <textarea
+                rows={5}
+                value={simDiff}
+                onChange={(e) => setSimDiff(e.target.value)}
+                className="w-full bg-[#0D0C0A] border border-[#26231D] focus:border-accent-orange rounded-lg p-3 text-[#F5F2EB] font-mono outline-none text-xs"
+              />
             </div>
+
+            {/* Doc Input */}
+            <div className="flex flex-col gap-2 font-mono text-xs">
+              <label className="text-[#F5F2EB] font-semibold">
+                Existing Markdown Document (README.md)
+              </label>
+              <textarea
+                rows={5}
+                value={simDoc}
+                onChange={(e) => setSimDoc(e.target.value)}
+                className="w-full bg-[#0D0C0A] border border-[#26231D] focus:border-accent-orange rounded-lg p-3 text-[#F5F2EB] font-mono outline-none text-xs"
+              />
+            </div>
+
+            {/* Execute Button */}
+            <button
+              type="button"
+              disabled={simLoading}
+              onClick={() => void handleRunSimulation()}
+              className="w-full bg-accent-orange hover:bg-accent-orange-hover text-black font-semibold py-3 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+            >
+              {simLoading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Running 6-Stage Pipeline...</span>
+                </>
+              ) : (
+                <>
+                  <Play className="w-4 h-4 fill-current stroke-none" />
+                  <span>Execute Drift Simulation</span>
+                </>
+              )}
+            </button>
+
+            {simError && (
+              <div className="border border-red-900/50 bg-red-950/20 text-red-300 rounded-xl p-4 text-xs font-mono">
+                {simError}
+              </div>
+            )}
+
+            {/* Simulation Results View */}
+            {simResult && (
+              <div className="border border-[#26231D] bg-[#0D0C0A] rounded-xl p-5 flex flex-col gap-4 font-mono text-xs">
+                <span className="text-emerald-400 font-semibold uppercase tracking-wider flex items-center gap-1.5">
+                  <Check className="w-4 h-4" />
+                  Simulation Succeeded (Stage 06 Complete)
+                </span>
+
+                <div>
+                  <span className="text-[#8E897F] block mb-1">
+                    CHANGED SYMBOLS DETECTED:
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {simResult.change_report.changed_symbols.map((s, i) => (
+                      <span
+                        key={i}
+                        className="bg-[#1F1D18] text-[#F5F2EB] px-2 py-0.5 rounded border border-[#26231D]"
+                      >
+                        {s.symbol_name} ({s.change_class})
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <span className="text-[#8E897F] block mb-1">
+                    IMPACTED DOCUMENT SECTIONS:
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {simResult.drift_report.impacted_sections.map((sec, i) => (
+                      <span
+                        key={i}
+                        className="bg-accent-orange/10 text-accent-orange px-2 py-0.5 rounded border border-accent-orange/30"
+                      >
+                        {sec.doc_path} #{sec.heading} ({sec.match_method})
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                {simResult.publish_result && (
+                  <div className="pt-2 border-t border-[#26231D] flex items-center justify-between">
+                    <span className="text-[#8E897F]">
+                      Verification:{" "}
+                      <span className="text-emerald-400">
+                        {simResult.publish_result.verification_status}
+                      </span>
+                    </span>
+                    <a
+                      href={simResult.publish_result.pr_url || "#"}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-accent-orange hover:text-accent-orange-hover flex items-center gap-1"
+                    >
+                      <span>
+                        Simulated PR #{simResult.publish_result.pr_number}
+                      </span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
