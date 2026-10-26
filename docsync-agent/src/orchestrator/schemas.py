@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel
 
 # ── Evidence & Publish ────────────────────────────────────────────────────
 
@@ -21,17 +20,7 @@ class EvidenceRow(BaseModel):
     verification: str  # "passed" | "repaired" | "failed"
 
 
-class PublishResult(BaseModel):
-    """Result of the PR publishing step."""
-
-    delivery_id: str
-    pr_url: str | None = None
-    pr_number: int | None = None
-    evidence_table_md: str = ""
-    verification_status: str = "passed"  # "passed" | "repaired" | "failed"
-    files_updated: list[str] = Field(default_factory=list)
-    error: str | None = None
-
+from src.contracts.schemas import PublishResult
 
 # ── Protocols ─────────────────────────────────────────────────────────────
 
@@ -41,7 +30,7 @@ class OrchestratorProtocol(Protocol):
 
     async def run(
         self,
-        drift_report: "src.contracts.schemas.DriftReport",  # noqa: F821
+        drift_report: src.contracts.schemas.DriftReport,  # noqa: F821
         full_docs: dict[str, str],
     ) -> PublishResult: ...
 
@@ -52,7 +41,7 @@ class OrchestratorContextStoreProtocol(Protocol):
     Must be provided by the context_store module.
     """
 
-    async def save_edges(self, edges: list["src.contracts.schemas.CodeDocEdge"]) -> None: ...  # noqa: F821
+    async def save_edges(self, edges: list[src.contracts.schemas.CodeDocEdge]) -> None: ...  # noqa: F821
 
     async def save_publish_result(self, result: PublishResult) -> None: ...
 
@@ -61,4 +50,4 @@ class OrchestratorContextStoreProtocol(Protocol):
 
     async def get_edges_for_symbols(
         self, repo_full_name: str, symbol_names: list[str]
-    ) -> list["src.contracts.schemas.CodeDocEdge"]: ...  # noqa: F821
+    ) -> list[src.contracts.schemas.CodeDocEdge]: ...  # noqa: F821

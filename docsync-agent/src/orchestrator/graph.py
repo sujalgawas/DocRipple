@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -42,10 +43,10 @@ def build_graph(
 ) -> StateGraph:
     """Construct the fully wired orchestrator StateGraph (uncompiled)."""
     from src.orchestrator.nodes.planner import build_planner_node
-    from src.orchestrator.nodes.writer import build_writer_node
-    from src.orchestrator.nodes.verifier import build_verifier_node
-    from src.orchestrator.nodes.reviewer import build_reviewer_node
     from src.orchestrator.nodes.publisher import build_publisher_node
+    from src.orchestrator.nodes.reviewer import build_reviewer_node
+    from src.orchestrator.nodes.verifier import build_verifier_node
+    from src.orchestrator.nodes.writer import build_writer_node
 
     workflow = StateGraph(OrchestratorState)
 

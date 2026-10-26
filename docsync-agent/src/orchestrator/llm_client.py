@@ -45,7 +45,7 @@ class OpenAICompatibleLLMClient:
         api_key: str = "dev-key",
         model: str = "qwen/qwen-2.5-coder-32b-instruct",
     ) -> None:
-        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key or "dev-key")
         self._model = model
 
     async def generate_json(

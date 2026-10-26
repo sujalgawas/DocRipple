@@ -1,28 +1,29 @@
-"""Global application settings loaded from environment variables."""
+"""Application settings loaded from environment variables."""
 
-from pydantic_settings import BaseSettings
-
-
-class GlobalSettings(BaseSettings):
-    """Top-level settings shared across all modules."""
-
-    model_config = {"env_prefix": "DOCSYNC_", "case_sensitive": False}
-
-    # Database
-    database_url: str = "sqlite+aiosqlite:///docsync.db"
-
-    # GitHub
-    github_token: str = ""
-    github_webhook_secret: str = ""
-
-    # LLM Provider
-    llm_base_url: str = "https://api.openai.com/v1"
-    llm_api_key: str = ""
-    llm_model: str = "gpt-4o-mini"
-
-    # Runtime
-    max_retries: int = 2
-    log_level: str = "INFO"
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-settings = GlobalSettings()
+class AppSettings(BaseSettings):
+    """Global application settings."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    GITHUB_WEBHOOK_SECRET: str = "dev-secret"
+    GITHUB_TOKEN: str = ""
+    LLM_BASE_URL: str = "https://api.openai.com/v1"
+    LLM_API_KEY: str = "dev-key"
+    LLM_MODEL: str = "gpt-4o-mini"
+    SQLITE_DB_PATH: str = "docsync_context.db"
+    CHECKPOINT_DB_PATH: str = ":memory:"
+
+    # Runtime / Observability
+    LOG_LEVEL: str = "INFO"
+    MAX_RETRIES: int = 2
+
+
+settings = AppSettings()

@@ -9,7 +9,7 @@ from src.orchestrator.state import OrchestratorState
 
 logger = logging.getLogger(__name__)
 
-_CODE_FENCE_PATTERN = re.compile(r"```")
+_CODE_FENCE_PATTERN = re.compile(r"^\s*```", re.MULTILINE)
 _DOC_ANCHOR_PATTERN = re.compile(r"<!--\s*doc-anchor:.*?-->")
 
 
@@ -21,29 +21,23 @@ def build_verifier_node():
         errors: list[str] = []
         updated_docs: dict[str, str] = state.get("updated_docs", {})
         full_docs: dict[str, str] = state.get("full_docs", {})
-        drift = state["drift_report"]
-        changed_symbols = drift.change_report.changed_symbols
+        drafts = state.get("drafts", [])
         edit_plans = state.get("edit_plans", [])
 
         if not updated_docs:
             return {"verification_errors": errors}
 
-        # Build set of symbol names targeted across all plans
-        targeted_names: set[str] = set()
-        for plan in edit_plans:
-            targeted_names.update(plan.target_symbols)
+        # 1. Check targeted symbols appear in each updated section draft
+        for draft in drafts:
+            for plan in edit_plans:
+                if plan.doc_path == draft.doc_path and plan.heading == draft.heading:
+                    for s_name in plan.target_symbols:
+                        if s_name not in draft.updated_markdown:
+                            errors.append(
+                                f"{draft.doc_path}#{draft.heading}: targeted symbol `{s_name}` not found in updated section"
+                            )
 
         for doc_path, content in updated_docs.items():
-            # 1. Check every targeted symbol name appears in the updated doc
-            for plan in edit_plans:
-                if plan.doc_path != doc_path:
-                    continue
-                for s_name in plan.target_symbols:
-                    if s_name not in content:
-                        errors.append(
-                            f"{doc_path}: targeted symbol `{s_name}` not found in updated content"
-                        )
-
             # 2. Check code fences are balanced
             fences = _CODE_FENCE_PATTERN.findall(content)
             if len(fences) % 2 != 0:

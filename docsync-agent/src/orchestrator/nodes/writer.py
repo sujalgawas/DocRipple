@@ -25,8 +25,7 @@ def build_writer_node(llm_client: LLMClientProtocol):
         review_feedback: str = state.get("review_feedback", "")
         verification_errors: list[str] = state.get("verification_errors", [])
         retry_count: int = state.get("retry_count", 0)
-        drafts: list[SectionDraft] = list(state.get("drafts", []))
-        updated_docs: dict[str, str] = dict(state.get("updated_docs", full_docs))
+        updated_docs: dict[str, str] = dict(full_docs)
 
         drift = state["drift_report"]
         changed_symbols = drift.change_report.changed_symbols
@@ -38,7 +37,7 @@ def build_writer_node(llm_client: LLMClientProtocol):
                 retry_context += f"\n## Reviewer Feedback\n{review_feedback}\n"
             if verification_errors:
                 retry_context += (
-                    f"\n## Verification Errors\n"
+                    "\n## Verification Errors\n"
                     + "\n".join(f"- {e}" for e in verification_errors)
                     + "\n"
                 )
@@ -130,12 +129,19 @@ Preserve all <!-- doc-anchor: ... --> comments."""
 def _extract_section(content: str, heading: str) -> str:
     """Extract a heading-delimited section from markdown content."""
     lines = content.split("\n")
-    heading_pattern = "#" * 10  # max depth
     start_idx = None
     heading_level = 0
+    in_code_block = False
 
     for i, line in enumerate(lines):
         stripped = line.lstrip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+
+        if in_code_block:
+            continue
+
         if stripped.startswith("#"):
             level = len(stripped) - len(stripped.lstrip("#"))
             title = stripped.lstrip("#").strip()
@@ -153,13 +159,20 @@ def _extract_section(content: str, heading: str) -> str:
 def _splice_section(content: str, heading: str, new_section: str) -> str:
     """Replace a heading-delimited section in markdown content with new content."""
     lines = content.split("\n")
-    heading_pattern = "#" * 10
     start_idx = None
     end_idx = len(lines)
     heading_level = 0
+    in_code_block = False
 
     for i, line in enumerate(lines):
         stripped = line.lstrip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+
+        if in_code_block:
+            continue
+
         if stripped.startswith("#"):
             level = len(stripped) - len(stripped.lstrip("#"))
             title = stripped.lstrip("#").strip()
@@ -175,7 +188,6 @@ def _splice_section(content: str, heading: str, new_section: str) -> str:
         return content.rstrip() + "\n\n" + new_section
 
     # Keep the heading line itself, replace content after it
-    heading_line = lines[start_idx]
     result = lines[: start_idx + 1]
     result.append("")
     result.extend(new_section.split("\n"))

@@ -1,5 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -70,3 +71,14 @@ class DriftReport(BaseModel):
     model_config = ConfigDict(frozen=True)
     change_report: ChangeReport
     impacted_sections: list[ImpactedDocSection]
+
+
+class PublishResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    delivery_id: str
+    pr_url: str | None = None
+    pr_number: int | None = None
+    evidence_table_md: str = ""
+    verification_status: str = "passed"  # "passed" | "repaired" | "failed"
+    files_updated: list[str] = Field(default_factory=list)
+    error: str | None = None
