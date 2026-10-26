@@ -19,7 +19,13 @@ from fastapi.responses import RedirectResponse
 from src.config import settings
 from src.contracts.schemas import WebhookJob
 from src.web_api.github_service import GitHubService
-from src.web_api.schemas import ConnectRepoRequest, SettingsPatch, TriggerRequest
+from src.web_api.schemas import (
+    ConnectRepoRequest,
+    OAuthConfigRequest,
+    SettingsPatch,
+    TokenAuthRequest,
+    TriggerRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +136,118 @@ async def auth_me(request: Request) -> dict:
     }
 
 
+def _update_env_file(updates: dict[str, str]) -> None:
+    """Safely update key-value pairs in docsync-agent/.env and root .env."""
+    from pathlib import Path
+
+    candidates = [
+        Path("docsync-agent/.env"),
+        Path(".env"),
+        Path(__file__).resolve().parent.parent.parent / ".env",
+        Path(__file__).resolve().parent.parent.parent.parent / ".env",
+    ]
+    seen = set()
+    for p in candidates:
+        try:
+            resolved = p.resolve()
+            if resolved in seen or not resolved.is_file():
+                continue
+            seen.add(resolved)
+            lines = resolved.read_text(encoding="utf-8").splitlines()
+            updated_keys = set()
+            new_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and "=" in stripped:
+                    key = stripped.split("=", 1)[0].strip()
+                    if key in updates:
+                        new_lines.append(f"{key}={updates[key]}")
+                        updated_keys.add(key)
+                        continue
+                new_lines.append(line)
+            for key, val in updates.items():
+                if key not in updated_keys:
+                    new_lines.append(f"{key}={val}")
+            resolved.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
+
+@router.get("/auth/config")
+async def get_auth_config() -> dict:
+    """Return whether OAuth is configured and callback info."""
+    return {
+        "oauth_configured": bool(settings.GITHUB_CLIENT_ID and settings.GITHUB_CLIENT_SECRET),
+        "client_id": settings.GITHUB_CLIENT_ID or None,
+        "callback_url": "http://localhost:8000/api/v1/auth/github/callback",
+    }
+
+
+@router.post("/auth/token")
+async def auth_with_token(payload: TokenAuthRequest, request: Request) -> dict:
+    """Authenticate with a GitHub Personal Access Token."""
+    token = payload.token.strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token cannot be empty.",
+        )
+
+    service = GitHubService(token=token)
+    try:
+        user = await service.get_authenticated_user()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid GitHub token or bad credentials.",
+        ) from exc
+
+    app_service = _get_github_service(request)
+    app_service.token = token
+    request.app.state.github_oauth_token = token
+    settings.GITHUB_TOKEN = token
+
+    pipeline = getattr(request.app.state, "pipeline", None)
+    if pipeline is not None and hasattr(pipeline, "fetcher"):
+        pipeline.fetcher.token = token
+
+    await _get_store(request).update_user_settings(
+        github_username=user["login"]
+    )
+    _update_env_file({"GITHUB_TOKEN": token})
+
+    return {
+        "connected": True,
+        "username": user["login"],
+        "avatar_url": user["avatar_url"],
+        "plan": "free",
+        "authorized_repos_count": user["repo_count"],
+    }
+
+
+@router.post("/auth/oauth-config")
+async def save_oauth_config(payload: OAuthConfigRequest) -> dict:
+    """Save GitHub OAuth App credentials."""
+    client_id = payload.client_id.strip()
+    client_secret = payload.client_secret.strip()
+    if not client_id or not client_secret:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Both Client ID and Client Secret are required.",
+        )
+    settings.GITHUB_CLIENT_ID = client_id
+    settings.GITHUB_CLIENT_SECRET = client_secret
+    _update_env_file({
+        "GITHUB_CLIENT_ID": client_id,
+        "GITHUB_CLIENT_SECRET": client_secret,
+    })
+    return {
+        "status": "ok",
+        "oauth_configured": True,
+        "client_id": client_id,
+    }
+
+
 @router.get("/auth/github/login")
 async def github_login(request: Request) -> RedirectResponse:
     """Start OAuth, or fall back to the PAT-backed dashboard."""
@@ -162,7 +280,7 @@ async def github_callback(
     code: str = Query(default=""),
     state: str = Query(default=""),
 ) -> RedirectResponse:
-    """Complete OAuth and send the user back to the React app."""
+    """Complete OAuth and send the user directly to the Add Repository picker."""
     expected_state = getattr(request.app.state, "oauth_state", "")
     if not expected_state or state != expected_state:
         raise HTTPException(
@@ -188,12 +306,13 @@ async def github_callback(
         await _get_store(request).update_user_settings(
             github_username=user["login"]
         )
+        _update_env_file({"GITHUB_TOKEN": token})
     except Exception as exc:
         logger.exception("GitHub OAuth callback failed")
         raise _github_failure(exc) from exc
 
     return RedirectResponse(
-        url=f"{settings.FRONTEND_URL}/repositories", status_code=307
+        url=f"{settings.FRONTEND_URL}/repositories/new", status_code=307
     )
 
 

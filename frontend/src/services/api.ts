@@ -91,6 +91,12 @@ export interface AuthMe {
   authorized_repos_count: number;
 }
 
+export interface AuthConfig {
+  oauth_configured: boolean;
+  client_id: string | null;
+  callback_url: string;
+}
+
 export interface GitHubRepoSummary {
   full_name: string;
   name: string;
@@ -247,8 +253,32 @@ export function getAuthMe(): Promise<AuthMe> {
   return request<AuthMe>("/api/v1/auth/me");
 }
 
+export function getAuthConfig(): Promise<AuthConfig> {
+  return request<AuthConfig>("/api/v1/auth/config");
+}
+
 export function githubLoginUrl(): string {
   return `${API_BASE}/api/v1/auth/github/login`;
+}
+
+export function loginWithToken(token: string): Promise<AuthMe> {
+  return request<AuthMe>("/api/v1/auth/token", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+}
+
+export function saveOAuthConfig(
+  clientId: string,
+  clientSecret: string
+): Promise<{ status: string; oauth_configured: boolean; client_id: string }> {
+  return request<{ status: string; oauth_configured: boolean; client_id: string }>(
+    "/api/v1/auth/oauth-config",
+    {
+      method: "POST",
+      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+    }
+  );
 }
 
 // ── Repository discovery & onboarding ──────────────────────────────────────

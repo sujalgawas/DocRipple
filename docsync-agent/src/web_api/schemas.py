@@ -34,3 +34,21 @@ class SettingsPatch(BaseModel):
     require_reviewer_approval: bool | None = None
     skip_internal_changes: bool | None = None
     email_on_failed_runs: bool | None = None
+
+
+class TokenAuthRequest(BaseModel):
+    """Personal Access Token submission."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    token: str
+
+
+class OAuthConfigRequest(BaseModel):
+    """GitHub OAuth App credentials."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    client_id: str
+    client_secret: str
+
