@@ -6,7 +6,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from src.contracts.schemas import DriftReport
+from src.contracts.schemas import DriftReport, RepoMemoryMap
 from src.orchestrator.prompts import PLANNER_SYSTEM_PROMPT
 from src.orchestrator.state import OrchestratorState, SectionEditPlan
 
@@ -58,11 +58,16 @@ def build_planner_node(llm_client: LLMClientProtocol):
             indent=2,
         )
 
+        memory_context = _format_memory_context(state.get("memory_subgraph"))
+
         user_prompt = f"""Changed Symbols:
 {symbols_json}
 
 Impacted Documentation Sections:
 {sections_json}
+
+Repository Memory Subgraph:
+{memory_context}
 
 Produce a JSON array of edit plan objects. Each object must have exactly:
 - "doc_path": string
@@ -98,6 +103,43 @@ Produce a JSON array of edit plan objects. Each object must have exactly:
         }
 
     return planner_node
+
+
+def _format_memory_context(subgraph: RepoMemoryMap | None) -> str:
+    """Render the 2-hop memory subgraph as architecturally useful prompt context."""
+    if subgraph is None:
+        return "No repository memory map is available for this run."
+
+    modules = [node for node in subgraph.nodes if node.node_type == "module"]
+    files = [node for node in subgraph.nodes if node.node_type == "file"]
+    symbols = [node for node in subgraph.nodes if node.node_type == "symbol"]
+    docs = [node for node in subgraph.nodes if node.node_type == "doc_section"]
+
+    parent_modules = ", ".join(f"`{node.name}`" for node in modules[:12]) or "none"
+    related_symbols = "; ".join(
+        f"`{node.name}` in `{node.path}` - {node.summary}" for node in symbols[:16]
+    ) or "none"
+    connected_docs = "; ".join(
+        f"`{node.path}#{node.name}` - {node.summary}" for node in docs[:16]
+    ) or "none"
+    relations = ", ".join(
+        f"{relation}={count}"
+        for relation, count in sorted(
+            {
+                relation: sum(1 for edge in subgraph.edges if edge.relation == relation)
+                for relation in {edge.relation for edge in subgraph.edges}
+            }.items()
+        )
+    ) or "none"
+
+    return f"""Repository: {subgraph.repo_full_name}
+Nodes: {len(subgraph.nodes)} · Edges: {len(subgraph.edges)} ({relations})
+Parent modules / packages: {parent_modules}
+Related files: {', '.join(f'`{node.path}`' for node in files[:16]) or 'none'}
+Related symbols: {related_symbols}
+Connected documentation sections: {connected_docs}
+Use this graph to preserve parent-module behavior, sibling APIs, and the exact
+documentation sections that already reference the changed symbols."""
 
 
 def _extract_json_array(text: str) -> str | None:

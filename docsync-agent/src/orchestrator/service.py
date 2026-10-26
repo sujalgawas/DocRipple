@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from src.contracts.schemas import DriftReport
+from src.contracts.schemas import DocStyleSkill, DriftReport, RepoMemoryMap
 from src.orchestrator.config import OrchestratorConfig
 from src.orchestrator.github_client import HttpGitHubPublisher
 from src.orchestrator.graph import _checkpointer, build_graph
@@ -64,10 +64,18 @@ class OrchestratorService:
         )
 
         config = {"configurable": {"thread_id": delivery_id}}
+        repo_full_name = drift_report.change_report.repo_full_name
+        seed_symbols = [
+            symbol.symbol_name for symbol in drift_report.change_report.changed_symbols
+        ]
+        doc_style_skill = await self._load_style_skill(repo_full_name)
+        memory_subgraph = await self._load_memory_subgraph(repo_full_name, seed_symbols)
 
         initial: dict = {
             "drift_report": drift_report,
             "full_docs": full_docs,
+            "doc_style_skill": doc_style_skill,
+            "memory_subgraph": memory_subgraph,
             "edit_plans": [],
             "drafts": [],
             "updated_docs": {},
@@ -92,3 +100,45 @@ class OrchestratorService:
             verification_status="failed",
             error="Pipeline did not produce a publish result",
         )
+
+    async def _load_style_skill(self, repo_full_name: str) -> DocStyleSkill | None:
+        """Load Stage 0's style skill when the store supports onboarding."""
+        loader = getattr(self._context_store, "get_style_skill", None)
+        if not callable(loader):
+            return None
+        try:
+            return await loader(repo_full_name)
+        except Exception:
+            logger.warning(
+                "Failed to load DocStyleSkill for %s",
+                repo_full_name,
+                exc_info=True,
+            )
+            return None
+
+    async def _load_memory_subgraph(
+        self, repo_full_name: str, seed_symbols: list[str]
+    ) -> RepoMemoryMap | None:
+        """Load the 2-hop memory subgraph around changed symbols."""
+        loader = getattr(self._context_store, "get_memory_subgraph", None)
+        if not callable(loader):
+            return None
+        try:
+            return await loader(repo_full_name, seed_symbols, max_hops=2)
+        except TypeError:
+            try:
+                return await loader(repo_full_name, seed_symbols)
+            except Exception:
+                logger.warning(
+                    "Failed to load RepoMemoryMap subgraph for %s",
+                    repo_full_name,
+                    exc_info=True,
+                )
+                return None
+        except Exception:
+            logger.warning(
+                "Failed to load RepoMemoryMap subgraph for %s",
+                repo_full_name,
+                exc_info=True,
+            )
+            return None

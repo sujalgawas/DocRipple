@@ -6,6 +6,15 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
+from src.contracts.schemas import (
+    CodeDocEdge,
+    DocStyleSkill,
+    DriftReport,
+    MemoryNode,
+    PublishResult,
+    RepoMemoryMap,
+)
+
 # ── Evidence & Publish ────────────────────────────────────────────────────
 
 
@@ -20,8 +29,6 @@ class EvidenceRow(BaseModel):
     verification: str  # "passed" | "repaired" | "failed"
 
 
-from src.contracts.schemas import PublishResult
-
 # ── Protocols ─────────────────────────────────────────────────────────────
 
 
@@ -30,7 +37,7 @@ class OrchestratorProtocol(Protocol):
 
     async def run(
         self,
-        drift_report: src.contracts.schemas.DriftReport,  # noqa: F821
+        drift_report: DriftReport,
         full_docs: dict[str, str],
     ) -> PublishResult: ...
 
@@ -41,7 +48,7 @@ class OrchestratorContextStoreProtocol(Protocol):
     Must be provided by the context_store module.
     """
 
-    async def save_edges(self, edges: list[src.contracts.schemas.CodeDocEdge]) -> None: ...  # noqa: F821
+    async def save_edges(self, edges: list[CodeDocEdge]) -> None: ...
 
     async def save_publish_result(self, result: PublishResult) -> None: ...
 
@@ -50,4 +57,16 @@ class OrchestratorContextStoreProtocol(Protocol):
 
     async def get_edges_for_symbols(
         self, repo_full_name: str, symbol_names: list[str]
-    ) -> list[src.contracts.schemas.CodeDocEdge]: ...  # noqa: F821
+    ) -> list[CodeDocEdge]: ...
+
+    # Stage 0 context (optional for older stores; the service degrades gracefully)
+    async def get_style_skill(self, repo_full_name: str) -> DocStyleSkill | None: ...
+
+    async def get_memory_subgraph(
+        self,
+        repo_full_name: str,
+        seed_symbols: list[str],
+        max_hops: int = 2,
+    ) -> RepoMemoryMap: ...
+
+    async def upsert_memory_nodes(self, nodes: list[MemoryNode]) -> None: ...

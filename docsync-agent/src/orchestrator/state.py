@@ -6,7 +6,7 @@ from typing import TypedDict
 
 from pydantic import BaseModel
 
-from src.contracts.schemas import DriftReport
+from src.contracts.schemas import DocStyleSkill, DriftReport, RepoMemoryMap
 from src.orchestrator.schemas import EvidenceRow, PublishResult
 
 
@@ -38,6 +38,8 @@ class OrchestratorState(TypedDict, total=False):
     # ── Input ──────────────────────────────────────────────────────────
     drift_report: DriftReport
     full_docs: dict[str, str]  # doc_path -> full_markdown
+    doc_style_skill: DocStyleSkill | None
+    memory_subgraph: RepoMemoryMap | None
 
     # ── Planner output ─────────────────────────────────────────────────
     edit_plans: list[SectionEditPlan]

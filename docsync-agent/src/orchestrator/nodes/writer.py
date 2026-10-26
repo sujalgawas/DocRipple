@@ -26,9 +26,20 @@ def build_writer_node(llm_client: LLMClientProtocol):
         verification_errors: list[str] = state.get("verification_errors", [])
         retry_count: int = state.get("retry_count", 0)
         updated_docs: dict[str, str] = dict(full_docs)
+        style_skill = state.get("doc_style_skill")
 
         drift = state["drift_report"]
         changed_symbols = drift.change_report.changed_symbols
+
+        system_prompt = WRITER_SYSTEM_PROMPT
+        if style_skill is not None:
+            system_prompt = (
+                f"{WRITER_SYSTEM_PROMPT}\n\n"
+                "## Repository DocStyleSkill (MUST FOLLOW)\n"
+                f"{style_skill.skill_markdown}\n\n"
+                "Follow every convention above exactly. The skill overrides generic "
+                "style defaults but never overrides factual consistency with the code diff."
+            )
 
         # Build feedback context for retries
         retry_context = ""
@@ -81,7 +92,7 @@ Output ONLY the rewritten section content as valid Markdown. Do not include the 
 Preserve all <!-- doc-anchor: ... --> comments."""
 
             try:
-                new_section = await llm_client.generate_text(WRITER_SYSTEM_PROMPT, user_prompt)
+                new_section = await llm_client.generate_text(system_prompt, user_prompt)
 
                 # Splice the new section back into the doc
                 spliced = _splice_section(current_content, heading, new_section)

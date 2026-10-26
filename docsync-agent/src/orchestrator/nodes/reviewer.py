@@ -43,6 +43,17 @@ def build_reviewer_node(llm_client: LLMClientProtocol):
         changed_symbols = drift.change_report.changed_symbols
         updated_docs: dict[str, str] = state.get("updated_docs", {})
         edit_plans = state.get("edit_plans", [])
+        style_skill = state.get("doc_style_skill")
+
+        system_prompt = REVIEWER_SYSTEM_PROMPT
+        if style_skill is not None:
+            system_prompt = (
+                f"{REVIEWER_SYSTEM_PROMPT}\n\n"
+                "## Repository DocStyleSkill (adherence is required)\n"
+                f"{style_skill.skill_markdown}\n\n"
+                "In addition to diff accuracy, reject drafts that violate these "
+                "tone, heading, code-fence, table, callout, or anchor conventions."
+            )
 
         docs_summary = "\n\n".join(
             f"### {path}\n{content[:2000]}"
@@ -75,10 +86,13 @@ Changed Symbols:
 Updated Documentation:
 {docs_summary}
 
+Repository DocStyleSkill:
+{style_skill.skill_markdown if style_skill is not None else 'No repository style skill available.'}
+
 Respond with APPROVED if everything checks out, or list specific issues prefixed with "- "."""
 
         try:
-            response = await llm_client.generate_text(REVIEWER_SYSTEM_PROMPT, user_prompt)
+            response = await llm_client.generate_text(system_prompt, user_prompt)
             if "APPROVED" in response.upper():
                 logger.info("Reviewer approved")
                 return {"review_approved": True}

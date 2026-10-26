@@ -134,7 +134,11 @@ class GitHubRepoFetcher:
 
 
 class DocSyncPipeline:
-    """Executes the 5-stage documentation drift and update pipeline."""
+    """Executes the Stage 1–5 documentation drift and update pipeline.
+
+    Stage 0 (onboarding) runs earlier when a repository is registered and
+    populates the style skill and memory map consumed by the orchestrator.
+    """
 
     def __init__(
         self,

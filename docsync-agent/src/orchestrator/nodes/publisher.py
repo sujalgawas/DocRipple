@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from src.contracts.schemas import CodeDocEdge
+from src.contracts.schemas import CodeDocEdge, MemoryNode, RepoMemoryMap
 from src.orchestrator.schemas import EvidenceRow, PublishResult
 from src.orchestrator.state import OrchestratorState
 
@@ -145,6 +147,19 @@ def build_publisher_node(
             except Exception:
                 logger.warning("Failed to persist publish result", exc_info=True)
 
+            # Keep Stage 0's node memory in sync with the published doc changes.
+            try:
+                await _refresh_memory_nodes(
+                    state=state,
+                    context_store=context_store,
+                    repo_full_name=change_report.repo_full_name,
+                    pr_url=pr_url,
+                    delivery_id=delivery_id,
+                    evidence=all_evidence,
+                )
+            except Exception:
+                logger.warning("Failed to refresh memory nodes", exc_info=True)
+
             logger.info("Published PR %s (#%d)", pr_url, pr_number)
             return {"publish_result": result}
 
@@ -159,6 +174,114 @@ def build_publisher_node(
             return {"publish_result": result}
 
     return publisher_node
+
+
+async def _refresh_memory_nodes(
+    *,
+    state: OrchestratorState,
+    context_store: OrchestratorContextStoreProtocol,
+    repo_full_name: str,
+    pr_url: str,
+    delivery_id: str,
+    evidence: list[EvidenceRow],
+) -> None:
+    """Update symbol and doc-section nodes touched by the published PR."""
+    subgraph: RepoMemoryMap | None = state.get("memory_subgraph")
+    if subgraph is None:
+        loader = getattr(context_store, "get_memory_subgraph", None)
+        if not callable(loader):
+            return
+        subgraph = await loader(
+            repo_full_name,
+            [row.changed_symbol for row in evidence],
+            max_hops=2,
+        )
+    if subgraph is None or not subgraph.nodes:
+        return
+
+    changed_symbols = state["drift_report"].change_report.changed_symbols
+    signatures = {
+        symbol.symbol_name: symbol.new_signature or symbol.old_signature
+        for symbol in changed_symbols
+    }
+    published_at = datetime.now(UTC).isoformat()
+    evidence_by_section: dict[tuple[str, str], set[str]] = {}
+    for row in evidence:
+        evidence_by_section.setdefault((row.doc_file, row.section), set()).add(
+            row.changed_symbol
+        )
+
+    updated_nodes: list[MemoryNode] = []
+    for node in subgraph.nodes:
+        if node.node_type == "symbol" and node.name in signatures:
+            metadata = _parse_metadata(node.metadata_json)
+            metadata.update(
+                {
+                    "last_published_delivery": delivery_id,
+                    "last_published_at": published_at,
+                    "last_pr_url": pr_url,
+                }
+            )
+            signature = signatures[node.name]
+            summary = (
+                f"{signature} (published in {delivery_id})"
+                if signature
+                else f"{node.summary} (published in {delivery_id})"
+            )
+            updated_nodes.append(
+                node.model_copy(
+                    update={
+                        "summary": summary,
+                        "metadata_json": json.dumps(metadata, sort_keys=True),
+                    }
+                )
+            )
+        elif node.node_type == "doc_section":
+            symbols = evidence_by_section.get((node.path, node.name))
+            if not symbols:
+                continue
+            metadata = _parse_metadata(node.metadata_json)
+            metadata.update(
+                {
+                    "last_published_delivery": delivery_id,
+                    "last_published_at": published_at,
+                    "last_published_symbols": sorted(symbols),
+                    "last_pr_url": pr_url,
+                }
+            )
+            updated_nodes.append(
+                node.model_copy(
+                    update={
+                        "summary": (
+                            f"{node.summary} Updated for "
+                            f"{', '.join(sorted(symbols))}."
+                        ),
+                        "metadata_json": json.dumps(metadata, sort_keys=True),
+                    }
+                )
+            )
+
+    if not updated_nodes:
+        return
+
+    for method_name in ("upsert_memory_nodes", "update_memory_nodes"):
+        method = getattr(context_store, method_name, None)
+        if callable(method):
+            await method(updated_nodes)
+            logger.info(
+                "Updated %d memory nodes after publishing %s",
+                len(updated_nodes),
+                delivery_id,
+            )
+            return
+
+
+def _parse_metadata(metadata_json: str) -> dict:
+    try:
+        parsed = json.loads(metadata_json)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _build_evidence_table(evidence: list[EvidenceRow]) -> str:

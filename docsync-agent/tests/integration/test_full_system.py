@@ -24,6 +24,7 @@ from src.context_store.sqlite_store import SqliteContextStore
 from src.drift.service import DriftEngineService
 from src.ingest.router import router as ingest_router
 from src.main import lifespan
+from src.onboarding.router import router as onboarding_router
 from src.orchestrator.config import OrchestratorConfig
 from src.orchestrator.service import OrchestratorService
 from src.pipeline import DocSyncPipeline, GitHubRepoFetcher
@@ -153,6 +154,7 @@ def app_with_mocks() -> tuple[FastAPI, MockLLMClient, MockGitHubPublisher, MockR
         lifespan=lifespan,
     )
     test_app.include_router(ingest_router)
+    test_app.include_router(onboarding_router)
 
     from src.main import demo_run, get_run_status, health
 
@@ -383,3 +385,151 @@ async def test_health_and_demo_endpoints(app_with_mocks):
             assert len(data["drift_report"]["impacted_sections"]) >= 1
             assert data["publish_result"] is not None
             assert data["publish_result"]["pr_number"] == 101
+
+
+@pytest.mark.asyncio
+async def test_stage0_onboarding_feeds_style_and_memory_into_orchestrator(app_with_mocks):
+    """Stage 0 runs first; Stage 4 receives the skill and 2-hop memory subgraph."""
+    app, mock_llm, mock_gh, _ = app_with_mocks
+
+    onboarding_docs = {
+        "README.md": (
+            "# Billing Service\n\n"
+            "## Overview\n\n"
+            "Use the billing API to calculate invoice totals. Run the example below.\n\n"
+            "| Option | Meaning |\n"
+            "| --- | --- |\n"
+            "| `--tax` | Tax rate |\n\n"
+            "```bash\n"
+            "curl -X POST http://localhost:8000/billing\n"
+            "```\n\n"
+            "```python\n"
+            "from src.billing import calc_total\n"
+            "total = calc_total([10, 20], tax_rate=0.08)\n"
+            "```\n\n"
+            "<!-- doc-anchor: calc_total -->\n\n"
+            "## Billing\n\n"
+            "Calculates invoice totals with `calc_total`.\n"
+        )
+    }
+    onboarding_code = {
+        "src/billing.py": NEW_BILLING,
+        "src/formatting.py": (
+            '"""Formatting helpers."""\n\n\n'
+            "def format_amount(value: float) -> str:\n"
+            '    """Format an amount for display."""\n'
+            '    return f"${value:.2f}"\n'
+        ),
+    }
+
+    async with app.router.lifespan_context(app):
+        store: SqliteContextStore = app.state.context_store
+        orchestrator = OrchestratorService(
+            llm_client=mock_llm,
+            github_publisher=mock_gh,
+            context_store=store,
+            config=OrchestratorConfig(checkpoint_db_path=":memory:", max_retries=2),
+        )
+        pipeline = DocSyncPipeline(
+            analyzer=ChangeAnalyzerService(),
+            drift_engine=DriftEngineService(),
+            orchestrator=orchestrator,
+            context_store=store,
+        )
+        app.state.pipeline = pipeline
+        app.state.worker.pipeline = pipeline
+
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            onboard_resp = await client.post(
+                "/api/v1/repos/onboard",
+                json={
+                    "repo_full_name": "org/repo",
+                    "code_files": onboarding_code,
+                    "docs": onboarding_docs,
+                },
+            )
+            assert onboard_resp.status_code == 200
+            onboard_data = onboard_resp.json()
+            assert onboard_data["style_skill"]["skill_markdown"].startswith("---")
+            assert onboard_data["initial_code_doc_edges"] >= 1
+
+            skill_resp = await client.get("/api/v1/repos/org/repo/skill")
+            assert skill_resp.status_code == 200
+
+            memory_resp = await client.get(
+                "/api/v1/repos/org/repo/memory",
+                params={"symbols": "calc_total"},
+            )
+            assert memory_resp.status_code == 200
+            memory_ids = {node["node_id"] for node in memory_resp.json()["nodes"]}
+            assert "symbol:src/billing.py::calc_total" in memory_ids
+
+            demo_resp = await client.post(
+                "/api/v1/demo/run",
+                json={
+                    "delivery_id": f"stage0-{uuid4().hex[:8]}",
+                    "repo_full_name": "org/repo",
+                    "raw_diff": VALID_DIFF,
+                    "docs": {
+                        "README.md": (
+                            "## Billing\n\n"
+                            "<!-- doc-anchor: billing -->\n\n"
+                            "Calculates total invoice.\n\n"
+                            "```python\n"
+                            "total = calc_total([10, 20])\n"
+                            "```\n"
+                        )
+                    },
+                },
+            )
+            assert demo_resp.status_code == 200
+            assert demo_resp.json()["publish_result"]["pr_number"] == 101
+
+            updated_memory = await client.get(
+                "/api/v1/repos/org/repo/memory",
+                params={"symbols": "calc_total"},
+            )
+            assert updated_memory.status_code == 200
+            updated_nodes = {
+                node["node_id"]: node for node in updated_memory.json()["nodes"]
+            }
+            symbol_metadata = json.loads(
+                updated_nodes["symbol:src/billing.py::calc_total"]["metadata_json"]
+            )
+            assert "last_published_delivery" in symbol_metadata
+            doc_node = next(
+                node
+                for node in updated_nodes.values()
+                if node["node_type"] == "doc_section"
+                and node["path"] == "README.md"
+                and node["name"] == "Billing"
+            )
+            assert "last_published_delivery" in json.loads(doc_node["metadata_json"])
+
+    planner_calls = [
+        (system, user)
+        for system, user in mock_llm.calls
+        if "planning agent" in system.lower()
+    ]
+    assert planner_calls
+    planner_prompt = planner_calls[-1][1]
+    assert "Repository Memory Subgraph" in planner_prompt
+    assert "Connected documentation sections" in planner_prompt
+    assert "README.md#Billing" in planner_prompt
+
+    writer_systems = [
+        system for system, _ in mock_llm.calls if "documentation writer" in system.lower()
+    ]
+    assert writer_systems
+    assert "Repository DocStyleSkill" in writer_systems[-1]
+    assert "org-repo-doc-style" in writer_systems[-1]
+
+    reviewer_systems = [
+        system for system, _ in mock_llm.calls if "documentation reviewer" in system.lower()
+    ]
+    assert reviewer_systems
+    assert "DocStyleSkill" in reviewer_systems[-1]
+
