@@ -3,6 +3,9 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { LandingPage } from "./pages/LandingPage";
 import { LoginPage } from "./pages/LoginPage";
 import { AppShell } from "./components/layout/AppShell";
+import { RepositoriesPage } from "./pages/RepositoriesPage";
+import { RepoDetailPage } from "./pages/RepoDetailPage";
+import { AddRepositoryPage } from "./pages/AddRepositoryPage";
 
 export const App: React.FC = () => {
   return (
@@ -14,7 +17,9 @@ export const App: React.FC = () => {
 
         {/* Authenticated Dashboard Routes */}
         <Route element={<AppShell />}>
-          <Route path="/repositories" element={<div className="p-8 text-muted">Repositories Dashboard</div>} />
+          <Route path="/repositories" element={<RepositoriesPage />} />
+          <Route path="/repositories/new" element={<AddRepositoryPage />} />
+          <Route path="/repositories/:owner/:repo" element={<RepoDetailPage />} />
         </Route>
 
         {/* Fallback */}
