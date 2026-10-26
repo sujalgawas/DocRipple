@@ -6,8 +6,6 @@ Covers: happy path, repair loop (verifier/reviewer → writer retry), and max-re
 from __future__ import annotations
 
 import json
-import re
-from datetime import datetime, UTC
 from typing import Any
 
 import pytest
@@ -22,9 +20,10 @@ from src.contracts.schemas import (
     ImpactedDocSection,
 )
 from src.orchestrator.config import OrchestratorConfig
-from src.orchestrator.schemas import EvidenceRow, OrchestratorContextStoreProtocol, PublishResult
+from src.orchestrator.schemas import (
+    PublishResult,
+)
 from src.orchestrator.service import OrchestratorService
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # Fakes

@@ -1,7 +1,7 @@
 """Shared async fixtures and in-memory SQLite ContextStore for tests."""
 
-import pytest
 import aiosqlite
+import pytest
 
 from src.context_store.models import DDL_STATEMENTS
 
