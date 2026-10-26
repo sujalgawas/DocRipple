@@ -1,9 +1,9 @@
 """ContextStore-specific exceptions."""
 
 
-class StorageError(RuntimeError):
-    """Generic storage operation failure."""
+class ContextStoreError(Exception):
+    """Base exception for all ContextStore failures."""
 
 
-class EdgeNotFoundError(KeyError):
-    """Requested code_doc_edge does not exist."""
+class DatabaseNotInitializedError(ContextStoreError):
+    """Raised when a store method is called before ``initialize()``."""
