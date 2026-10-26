@@ -1,9 +1,13 @@
 """Ingest-specific exceptions."""
 
 
-class InvalidSignatureError(ValueError):
-    """HMAC verification failed — request is not from GitHub."""
+class InvalidSignatureError(Exception):
+    """Raised when HMAC signature verification fails (maps to HTTP 401)."""
 
 
-class DuplicateDeliveryError(ValueError):
-    """Delivery ID already processed — idempotency guard."""
+class MissingWebhookHeaderError(Exception):
+    """Raised when a required webhook header is missing (maps to HTTP 400)."""
+
+
+class UnsupportedWebhookEventError(Exception):
+    """Raised when webhook event type is not supported (maps to HTTP 202)."""

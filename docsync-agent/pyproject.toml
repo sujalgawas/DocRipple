@@ -16,6 +16,8 @@ dependencies = [
     "tree-sitter>=0.23",
     "fastembed>=0.4",
     "python-multipart>=0.0.12",
+    "unidiff>=1.0.1",
+    "tree-sitter-language-pack>=1.22.1",
 ]
 
 [project.optional-dependencies]
@@ -35,3 +37,8 @@ packages = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.2",
+]

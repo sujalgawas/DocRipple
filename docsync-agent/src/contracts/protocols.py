@@ -1,43 +1,35 @@
-"""Protocols defining module boundaries. Implementations live in their owning modules."""
-
-from typing import Protocol, Optional
-
+from typing import Protocol
 from src.contracts.schemas import (
-    WebhookJob,
     ChangeReport,
     CodeDocEdge,
     DriftReport,
+    WebhookJob,
 )
 
 
 class ContextStoreProtocol(Protocol):
-    """Storage contract implemented by src/context_store/service.py."""
-
-    async def record_delivery(self, delivery_id: str) -> bool:
-        """Return True if delivery_id is new (not a duplicate)."""
+    async def check_and_record_delivery(self, delivery_id: str, repo_full_name: str) -> bool:
+        """Returns True if delivery_id is new and was recorded; False if duplicate."""
         ...
 
-    async def save_edges(self, edges: list[CodeDocEdge]) -> None:
-        ...
-
-    async def get_edges_for_symbol(self, symbol_name: str) -> list[CodeDocEdge]:
-        ...
-
-    async def save_run_trace(self, job_id: str, step: str, payload: str) -> None:
-        ...
+    async def get_edges_for_symbols(
+        self, repo_full_name: str, symbol_names: list[str]
+    ) -> list[CodeDocEdge]: ...
 
 
 class AnalyzerProtocol(Protocol):
-    """Analyzer contract implemented by src/analyzer/service.py."""
-
-    async def analyze_diff(self, job: WebhookJob) -> ChangeReport:
-        ...
+    async def analyze(
+        self,
+        job: WebhookJob,
+        raw_diff: str,
+        file_blobs: dict[str, tuple[str | None, str | None]] | None = None,
+    ) -> ChangeReport: ...
 
 
 class DriftEngineProtocol(Protocol):
-    """Drift engine contract implemented by src/drift/service.py."""
-
     async def compute_drift(
-        self, report: ChangeReport, doc_anchors: list[CodeDocEdge]
-    ) -> DriftReport:
-        ...
+        self,
+        change_report: ChangeReport,
+        docs: dict[str, str],
+        stored_edges: list[CodeDocEdge] | None = None,
+    ) -> DriftReport: ...

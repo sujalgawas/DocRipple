@@ -1,18 +1,9 @@
-"""Shared data models used across module boundaries."""
-
 from datetime import datetime
-from enum import Enum
-from typing import Optional
-from uuid import uuid4
-
-from pydantic import BaseModel, Field
+from enum import StrEnum
+from pydantic import BaseModel, ConfigDict, Field
 
 
-def _new_id() -> str:
-    return uuid4().hex
-
-
-class ChangeClass(str, Enum):
+class ChangeClass(StrEnum):
     API_SURFACE = "api_surface"
     CLI = "cli"
     ENV_CONFIG = "env_config"
@@ -20,64 +11,62 @@ class ChangeClass(str, Enum):
     BEHAVIOR = "behavior"
 
 
-# ── Webhook ──────────────────────────────────────────────
-
 class WebhookJob(BaseModel):
-    """Verified job enqueued by the ingest layer."""
-    job_id: str = Field(default_factory=_new_id)
+    model_config = ConfigDict(frozen=True)
     delivery_id: str
+    event_type: str  # "push" | "pull_request"
     repo_full_name: str
-    default_branch: str
-    head_commit: str
-    diff: str
-    received_at: datetime = Field(default_factory=datetime.utcnow)
+    base_sha: str
+    head_sha: str
+    ref: str
+    pr_number: int | None = None
+    received_at: datetime
 
-
-# ── Analyzer output ──────────────────────────────────────
 
 class ChangedSymbol(BaseModel):
-    name: str
-    kind: str  # function, class, method, route, cli_flag, env_var
-    signature: str
+    model_config = ConfigDict(frozen=True)
     file_path: str
+    symbol_name: str
+    symbol_kind: str  # "function" | "class" | "method" | "route" | "cli_flag" | "env_var" | "dependency"
+    change_class: ChangeClass
+    change_type: str  # "added" | "modified" | "removed"
+    old_signature: str | None = None
+    new_signature: str | None = None
     diff_hunk: str
 
 
 class ChangeReport(BaseModel):
-    job_id: str
-    symbols: list[ChangedSymbol] = []
-    change_classes: list[ChangeClass] = []
-    files_changed: list[str] = []
+    model_config = ConfigDict(frozen=True)
+    delivery_id: str
+    repo_full_name: str
+    base_sha: str
+    head_sha: str
+    changed_symbols: list[ChangedSymbol]
 
-
-# ── Drift / ContextStore models ──────────────────────────
 
 class CodeDocEdge(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    repo_full_name: str
     symbol_name: str
+    file_path: str
     doc_path: str
-    doc_section: str
-    anchor: Optional[str] = None
+    section_heading: str
+    anchor_type: str  # "explicit_anchor" | "inline_code" | "embedding"
 
 
-class EvidenceRow(BaseModel):
-    symbol: str
+class ImpactedDocSection(BaseModel):
+    model_config = ConfigDict(frozen=True)
     doc_path: str
-    section_before: str
-    section_after: str
-    status: str  # updated | unchanged | missing
+    heading: str
+    start_line: int
+    end_line: int
+    matched_symbols: list[str]
+    match_method: str  # "exact_anchor" | "graph_edge" | "inline_symbol" | "embedding_fallback"
+    confidence: float = Field(ge=0.0, le=1.0)
+    current_markdown: str
 
 
 class DriftReport(BaseModel):
-    job_id: str
-    stale_sections: list[CodeDocEdge] = []
-    evidence: list[EvidenceRow] = []
-
-
-# ── Orchestrator output ──────────────────────────────────
-
-class PublishResult(BaseModel):
-    job_id: str
-    pr_url: Optional[str] = None
-    pr_number: Optional[int] = None
-    files_updated: list[str] = []
-    error: Optional[str] = None
+    model_config = ConfigDict(frozen=True)
+    change_report: ChangeReport
+    impacted_sections: list[ImpactedDocSection]
