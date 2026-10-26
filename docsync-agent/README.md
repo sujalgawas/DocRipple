@@ -2,7 +2,7 @@
 
 > **Self-updating GitHub documentation agent powered by Stage 0 repository onboarding, deterministic AST parsing, hierarchical memory, and a LangGraph multi-agent repair loop.**
 
-[![Tests](https://img.shields.io/badge/pytest-39%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/pytest-58%20passed-brightgreen.svg)]()
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688.svg)]()
 [![Tree--sitter](https://img.shields.io/badge/Tree--sitter-AST%20Analysis-orange.svg)]()
@@ -195,15 +195,31 @@ cp .env.example .env
 Edit `.env` to configure your settings (works out-of-the-box in local dev mode):
 
 ```env
-GITHUB_WEBHOOK_SECRET=dev-secret
+# GitHub auth (PAT fallback; OAuth is optional)
 GITHUB_TOKEN=ghp_your_token_here
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+
+# Full public HTTPS URL of /api/v1/webhooks/github (ngrok, cloudflared, etc.).
+# Leave blank for local-only use and trigger runs from the dashboard.
+PUBLIC_WEBHOOK_URL=
+GITHUB_WEBHOOK_SECRET=docripple-secret
+FRONTEND_URL=http://localhost:5173
+
+# LLM provider
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_API_KEY=your_key_here
 LLM_MODEL=gpt-4o-mini
+
+# Storage
 SQLITE_DB_PATH=docsync_context.db
 CHECKPOINT_DB_PATH=:memory:
 LOG_LEVEL=INFO
 ```
+
+`GITHUB_TOKEN` needs `contents:read`, `pull_requests:write`, and
+`webhooks:write` (or `repo` scope for classic tokens). Both webhook
+installation and HMAC verification use `GITHUB_WEBHOOK_SECRET`.
 
 ### 3. Run the Application
 
@@ -216,10 +232,22 @@ The server is available at `http://localhost:8000`:
 - Swagger API Docs: `http://localhost:8000/docs`
 - Health check: `http://localhost:8000/health`
 
+To use the React dashboard (repository onboarding, activity, and settings):
+
+```bash
+cd ../frontend
+npm install
+npm run dev
+```
+
+Vite serves the dashboard at `http://localhost:5173` and calls
+`http://localhost:8000/api/v1/...` by default. Override the backend URL with
+`VITE_API_BASE_URL` if needed.
+
 ### 4. Run the Test Suite
 
 ```bash
-# Run all unit and integration tests (39 tests)
+# Run all unit and integration tests (58 tests)
 uv run pytest tests/ -q
 
 # Run with verbose output
@@ -235,9 +263,18 @@ uv run ruff check src/ tests/
 
 | Method | Endpoint | Stage | Purpose |
 | :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/auth/me` | — | GitHub identity used by the React dashboard. |
+| `GET` | `/api/v1/auth/github/login` | — | OAuth redirect; falls back to the dashboard with a PAT. |
+| `GET` | `/api/v1/github/repos` | — | Repositories available to the authenticated token. |
+| `POST` | `/api/v1/repos/connect` | 0 | Snapshot, onboard, install webhook, and monitor a repository. |
 | `POST` | `/api/v1/repos/onboard` | 0 | Generate and persist the repo `DocStyleSkill`, memory map, and initial code-doc edges. |
 | `GET` | `/api/v1/repos/{owner}/{repo}/skill` | 0 | Return the stored `DocStyleSkill`, including `skill_markdown`. |
 | `GET` | `/api/v1/repos/{owner}/{repo}/memory` | 0 | Return the full memory map; add `?symbols=foo,bar` for a 2-hop subgraph. |
+| `GET` | `/api/v1/dashboard` | — | Dashboard stats, monitored repositories, and latest runs. |
+| `GET` | `/api/v1/activity` | — | Activity runs, newest first (`?repo_full_name=` to filter). |
+| `POST` | `/api/v1/repos/{owner}/{repo}/trigger` | 1–5 | Enqueue the latest (or specified) commit for the full pipeline. |
+| `GET` / `PATCH` | `/api/v1/settings` | — | Read or update user preferences. |
+| `POST` | `/api/v1/settings/disconnect` | — | Remove installed webhooks and clear monitored repositories. |
 | `POST` | `/api/v1/webhooks/github` | 1 | Verified GitHub push/PR webhook. |
 | `POST` | `/api/v1/demo/run` | 2–5 | Run analyzer → drift → orchestrator synchronously. |
 | `GET` | `/api/v1/runs/{delivery_id}` | 5 | Fetch the persisted publish result for a delivery. |
@@ -313,7 +350,7 @@ Simulate an incoming GitHub webhook push event with HMAC-SHA256 signature:
 
 ```bash
 # Set secret and test payload
-SECRET="dev-secret"
+SECRET="docripple-secret"
 PAYLOAD='{"ref":"refs/heads/main","before":"1111111111111111111111111111111111111111","after":"2222222222222222222222222222222222222222","repository":{"full_name":"sujalgawas/DocRipple"}}'
 
 # Compute signature
