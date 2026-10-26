@@ -24,6 +24,8 @@ from src.onboarding.service import OnboardingService
 from src.orchestrator.config import OrchestratorConfig
 from src.orchestrator.service import OrchestratorService
 from src.pipeline import BackgroundQueueWorker, DocSyncPipeline, GitHubRepoFetcher
+from src.web_api.github_service import GitHubService, GitHubServicePublisher
+from src.web_api.router import router as web_api_router
 
 logger = logging.getLogger("docsync")
 
@@ -53,9 +55,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         checkpoint_db_path=settings.CHECKPOINT_DB_PATH,
         max_retries=settings.MAX_RETRIES,
     )
+    github_service = GitHubService(token=settings.GITHUB_TOKEN)
     orchestrator = OrchestratorService(
         context_store=store,
         config=orchestrator_config,
+        github_publisher=GitHubServicePublisher(github_service),
     )
 
     fetcher = GitHubRepoFetcher(token=settings.GITHUB_TOKEN)
@@ -65,6 +69,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         orchestrator=orchestrator,
         context_store=store,
         fetcher=fetcher,
+        github_service=github_service,
     )
 
     worker = BackgroundQueueWorker(queue=queue, pipeline=pipeline)
@@ -77,6 +82,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.pipeline = pipeline
     app.state.worker = worker
     app.state.settings = settings
+    app.state.github_service = github_service
+    app.state.github_oauth_token = ""
 
     logger.info("DocSync application startup complete")
     try:
@@ -99,15 +106,21 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Mount Stage 1 webhook router and Stage 0 onboarding router
+# Mount Stage 1 webhook router, Stage 0 onboarding router, and web API bridge
 app.include_router(ingest_router)
 app.include_router(onboarding_router)
+app.include_router(web_api_router)
 
 
 # ── Observability & Demo Endpoints ──────────────────────────────────────────
