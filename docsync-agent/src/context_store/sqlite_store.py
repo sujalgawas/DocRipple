@@ -17,7 +17,12 @@ from src.context_store.exceptions import DatabaseNotInitializedError
 from src.context_store.models import SCHEMA_SQL
 
 if TYPE_CHECKING:
-    from src.contracts.schemas import CodeDocEdge
+    from src.contracts.schemas import (
+        CodeDocEdge,
+        DocStyleSkill,
+        MemoryNode,
+        RepoMemoryMap,
+    )
     from src.orchestrator.schemas import EvidenceRow, PublishResult
 
 logger = logging.getLogger(__name__)
@@ -135,6 +140,244 @@ class SqliteContextStore:
             rows,
         )
         await self._db.commit()
+
+    # ── Stage 0: DocStyleSkill persistence ───────────────────────────────
+
+    async def save_style_skill(self, skill: DocStyleSkill) -> None:
+        """Persist (or replace) the repository-specific documentation style skill."""
+        await self._db.execute(
+            """INSERT INTO repo_style_skills
+               (repo_full_name, tone_and_voice, heading_conventions_json,
+                code_block_rules_json, formatting_patterns_json, skill_markdown,
+                generated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (repo_full_name) DO UPDATE SET
+                   tone_and_voice = excluded.tone_and_voice,
+                   heading_conventions_json = excluded.heading_conventions_json,
+                   code_block_rules_json = excluded.code_block_rules_json,
+                   formatting_patterns_json = excluded.formatting_patterns_json,
+                   skill_markdown = excluded.skill_markdown,
+                   generated_at = excluded.generated_at""",
+            (
+                skill.repo_full_name,
+                skill.tone_and_voice,
+                json.dumps(skill.heading_conventions),
+                json.dumps(skill.code_block_rules),
+                json.dumps(skill.formatting_patterns),
+                skill.skill_markdown,
+                skill.generated_at.isoformat(),
+            ),
+        )
+        await self._db.commit()
+
+    async def get_style_skill(self, repo_full_name: str) -> DocStyleSkill | None:
+        """Load a repository's DocStyleSkill, or ``None`` before onboarding."""
+        from src.contracts.schemas import DocStyleSkill
+
+        cursor = await self._db.execute(
+            "SELECT * FROM repo_style_skills WHERE repo_full_name = ?",
+            (repo_full_name,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+
+        try:
+            return DocStyleSkill(
+                repo_full_name=row["repo_full_name"],
+                tone_and_voice=row["tone_and_voice"],
+                heading_conventions=json.loads(row["heading_conventions_json"]),
+                code_block_rules=json.loads(row["code_block_rules_json"]),
+                formatting_patterns=json.loads(row["formatting_patterns_json"]),
+                skill_markdown=row["skill_markdown"],
+                generated_at=datetime.fromisoformat(row["generated_at"]),
+            )
+        except (ValueError, TypeError, json.JSONDecodeError):
+            logger.warning("Ignoring malformed style skill for %s", repo_full_name)
+            return None
+
+    # ── Stage 0: repository memory graph ─────────────────────────────────
+
+    async def save_memory_map(self, memory_map: RepoMemoryMap) -> None:
+        """Replace a repository's memory nodes and edges atomically."""
+        from src.contracts.schemas import RepoMemoryMap
+
+        memory_map = RepoMemoryMap.model_validate(memory_map)
+        repo = memory_map.repo_full_name
+
+        node_rows = [
+            (
+                repo,
+                node.node_id,
+                node.node_type,
+                node.name,
+                node.path,
+                node.summary,
+                node.metadata_json,
+            )
+            for node in memory_map.nodes
+        ]
+        edge_rows = [
+            (repo, edge.source_id, edge.target_id, edge.relation)
+            for edge in memory_map.edges
+        ]
+
+        try:
+            await self._db.execute(
+                "DELETE FROM repo_memory_edges WHERE repo_full_name = ?", (repo,)
+            )
+            await self._db.execute(
+                "DELETE FROM repo_memory_nodes WHERE repo_full_name = ?", (repo,)
+            )
+
+            await self._db.executemany(
+                """INSERT OR REPLACE INTO repo_memory_nodes
+                   (repo_full_name, node_id, node_type, name, path, summary, metadata_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                node_rows,
+            )
+            await self._db.executemany(
+                """INSERT OR REPLACE INTO repo_memory_edges
+                   (repo_full_name, source_id, target_id, relation)
+                   VALUES (?, ?, ?, ?)""",
+                edge_rows,
+            )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
+
+    async def get_memory_subgraph(
+        self,
+        repo_full_name: str,
+        seed_symbols: list[str],
+        max_hops: int = 2,
+    ) -> RepoMemoryMap:
+        """Traverse both edge directions around matching seed nodes.
+
+        Nodes match a seed when their name, path, node id, symbol suffix, or
+        doc-section anchor suffix equals the seed. An empty seed list returns
+        the complete memory map for the repository.
+        """
+        from src.contracts.schemas import MemoryEdge, MemoryNode, RepoMemoryMap
+
+        node_cursor = await self._db.execute(
+            "SELECT * FROM repo_memory_nodes WHERE repo_full_name = ? ORDER BY node_id",
+            (repo_full_name,),
+        )
+        node_rows = await node_cursor.fetchall()
+        nodes = [
+            MemoryNode(
+                node_id=row["node_id"],
+                repo_full_name=row["repo_full_name"],
+                node_type=row["node_type"],
+                name=row["name"],
+                path=row["path"],
+                summary=row["summary"],
+                metadata_json=row["metadata_json"],
+            )
+            for row in node_rows
+        ]
+
+        edge_cursor = await self._db.execute(
+            """SELECT repo_full_name, source_id, target_id, relation
+               FROM repo_memory_edges WHERE repo_full_name = ?
+               ORDER BY source_id, target_id, relation""",
+            (repo_full_name,),
+        )
+        edge_rows = await edge_cursor.fetchall()
+        edges = [
+            MemoryEdge(
+                repo_full_name=row["repo_full_name"],
+                source_id=row["source_id"],
+                target_id=row["target_id"],
+                relation=row["relation"],
+            )
+            for row in edge_rows
+        ]
+
+        if not seed_symbols:
+            return RepoMemoryMap(
+                repo_full_name=repo_full_name,
+                nodes=nodes,
+                edges=edges,
+                updated_at=datetime.now(UTC),
+            )
+
+        seeds = {seed.strip() for seed in seed_symbols if seed.strip()}
+        seed_ids = {
+            node.node_id for node in nodes if _node_matches_seed(node, seeds)
+        }
+
+        visited = set(seed_ids)
+        frontier = set(seed_ids)
+        for _ in range(max(0, max_hops)):
+            next_frontier: set[str] = set()
+            for edge in edges:
+                if edge.source_id in frontier and edge.target_id not in visited:
+                    next_frontier.add(edge.target_id)
+                if edge.target_id in frontier and edge.source_id not in visited:
+                    next_frontier.add(edge.source_id)
+            if not next_frontier:
+                break
+            visited.update(next_frontier)
+            frontier = next_frontier
+
+        selected_nodes = [node for node in nodes if node.node_id in visited]
+        selected_edges = [
+            edge
+            for edge in edges
+            if edge.source_id in visited and edge.target_id in visited
+        ]
+
+        return RepoMemoryMap(
+            repo_full_name=repo_full_name,
+            nodes=sorted(selected_nodes, key=lambda node: node.node_id),
+            edges=sorted(
+                selected_edges,
+                key=lambda edge: (edge.source_id, edge.target_id, edge.relation),
+            ),
+            updated_at=datetime.now(UTC),
+        )
+
+    async def get_memory_map(self, repo_full_name: str) -> RepoMemoryMap:
+        """Return the complete repository memory map."""
+        return await self.get_memory_subgraph(repo_full_name, [])
+
+    async def upsert_memory_nodes(self, nodes: list[MemoryNode]) -> None:
+        """Insert or update memory nodes without replacing the whole graph."""
+        if not nodes:
+            return
+
+        rows = [
+            (
+                node.repo_full_name,
+                node.node_id,
+                node.node_type,
+                node.name,
+                node.path,
+                node.summary,
+                node.metadata_json,
+            )
+            for node in nodes
+        ]
+        await self._db.executemany(
+            """INSERT INTO repo_memory_nodes
+               (repo_full_name, node_id, node_type, name, path, summary, metadata_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (repo_full_name, node_id) DO UPDATE SET
+                   node_type = excluded.node_type,
+                   name = excluded.name,
+                   path = excluded.path,
+                   summary = excluded.summary,
+                   metadata_json = excluded.metadata_json""",
+            rows,
+        )
+        await self._db.commit()
+
+    async def update_memory_nodes(self, nodes: list[MemoryNode]) -> None:
+        """Alias for :meth:`upsert_memory_nodes`."""
+        await self.upsert_memory_nodes(nodes)
 
     # ── Run traces: PublishResult persistence ────────────────────────────
 
@@ -262,3 +505,15 @@ class SqliteContextStore:
             (repo_full_name, doc_path, section_heading, content_hash, embedding_json),
         )
         await self._db.commit()
+
+
+def _node_matches_seed(node: MemoryNode, seeds: set[str]) -> bool:
+    """Return True when a memory node corresponds to any requested seed."""
+    if node.name in seeds or node.path in seeds or node.node_id in seeds:
+        return True
+
+    suffix_positions = (node.node_id.rfind("::"), node.node_id.rfind("#"))
+    return any(
+        position >= 0 and node.node_id[position + 2 :] in seeds
+        for position in suffix_positions
+    )
