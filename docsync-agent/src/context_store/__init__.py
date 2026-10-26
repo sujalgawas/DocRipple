@@ -1,0 +1,1 @@
+"""ContextStore module — SQLite WAL persistence layer."""

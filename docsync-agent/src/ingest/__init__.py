@@ -1,0 +1,1 @@
+"""Ingest module — GitHub webhook receiver."""

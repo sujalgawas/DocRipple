@@ -1,0 +1,1 @@
+"""Frozen contracts — read-only for all module agents."""

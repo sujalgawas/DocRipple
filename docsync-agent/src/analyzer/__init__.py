@@ -1,0 +1,1 @@
+"""Analyzer module — deterministic diff analysis via tree-sitter (no LLM)."""

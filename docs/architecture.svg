@@ -1,0 +1,234 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 840" width="100%" height="100%">
+  <defs>
+    <!-- Gradients -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0f1d"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+
+    <linearGradient id="card-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+
+    <linearGradient id="accent-blue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+
+    <linearGradient id="accent-purple" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c084fc"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+
+    <linearGradient id="accent-amber" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+
+    <linearGradient id="accent-emerald" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+
+    <!-- Filters -->
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="115%" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+
+    <!-- Arrow Markers -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#a855f7"/>
+    </marker>
+    <marker id="arrow-emerald" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399"/>
+    </marker>
+  </defs>
+
+  <style>
+    .title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-weight: 700; fill: #f8fafc; }
+    .subtitle { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; fill: #94a3b8; }
+    .node-title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-weight: 600; font-size: 15px; fill: #f1f5f9; }
+    .node-desc { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 12px; fill: #94a3b8; line-height: 1.4; }
+    .badge { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; }
+    .edge-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; font-weight: 500; fill: #94a3b8; }
+  </style>
+
+  <!-- Background -->
+  <rect width="100%" height="100%" fill="url(#bg-grad)" rx="16"/>
+  <rect width="100%" height="100%" fill="none" stroke="#1e293b" stroke-width="1.5" rx="16"/>
+
+  <!-- Header -->
+  <g transform="translate(490, 42)" text-anchor="middle">
+    <text class="title" font-size="22">DocRipple System Architecture</text>
+    <text class="subtitle" y="24">Deterministic Drift Detection &amp; LangGraph-Powered Doc Remediation</text>
+  </g>
+
+  <!-- GitHub Webhook Source -->
+  <g transform="translate(60, 105)" filter="url(#shadow)">
+    <rect width="170" height="74" rx="12" fill="#131b2e" stroke="#38bdf8" stroke-width="1.5"/>
+    <text class="node-title" x="85" y="32" text-anchor="middle" fill="#38bdf8">GitHub</text>
+    <text class="node-desc" x="85" y="52" text-anchor="middle">Push Event Webhook</text>
+  </g>
+
+  <!-- Flow Arrow: GitHub -> Ingest -->
+  <path d="M 230 142 L 310 142" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="238" y="126" width="60" height="18" rx="4" fill="#0f172a"/>
+  <text class="edge-label" x="268" y="139" text-anchor="middle" fill="#38bdf8">webhook</text>
+
+  <!-- [1 Ingest] -->
+  <g transform="translate(320, 95)" filter="url(#shadow)">
+    <rect width="590" height="92" rx="12" fill="#131b2e" stroke="#1e293b" stroke-width="1.5"/>
+    <rect x="0" y="0" width="6" height="92" rx="3" fill="url(#accent-blue)"/>
+    <text class="node-title" x="24" y="30">[1 Ingest] FastAPI Webhook Receiver</text>
+    <rect x="470" y="16" width="100" height="20" rx="10" fill="#0369a1" fill-opacity="0.25"/>
+    <text class="badge" x="520" y="30" text-anchor="middle" fill="#38bdf8">FASTAPI</text>
+    <text class="node-desc" x="24" y="54">• Verify HMAC-SHA256 signature (GITHUB_WEBHOOK_SECRET)</text>
+    <text class="node-desc" x="24" y="73">• Deduplicate X-GitHub-Delivery ID &amp; enqueue verified WebhookJob</text>
+  </g>
+
+  <!-- Flow Arrow: Ingest -> Analyzer -->
+  <path d="M 615 187 L 615 227" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="625" y="197" width="80" height="18" rx="4" fill="#0f172a"/>
+  <text class="edge-label" x="665" y="210" text-anchor="middle">WebhookJob</text>
+
+  <!-- [2 Change Analyzer] -->
+  <g transform="translate(180, 227)" filter="url(#shadow)">
+    <rect width="730" height="96" rx="12" fill="#131b2e" stroke="#1e293b" stroke-width="1.5"/>
+    <rect x="0" y="0" width="6" height="96" rx="3" fill="url(#accent-amber)"/>
+    <text class="node-title" x="24" y="30">[2 Change Analyzer] Tree-sitter AST &amp; Diff Engine</text>
+    <rect x="580" y="16" width="130" height="20" rx="10" fill="#b45309" fill-opacity="0.25"/>
+    <text class="badge" x="645" y="30" text-anchor="middle" fill="#fbbf24">NO LLM · DETERMINISTIC</text>
+    <text class="node-desc" x="24" y="54">• Parse unified diffs into modified hunks via unidiff</text>
+    <text class="node-desc" x="24" y="72">• Extract symbols &amp; signatures with tree-sitter → Classify: API | CLI | ENV | DEPS | BEHAVIOR</text>
+  </g>
+
+  <!-- Flow Arrow: Analyzer -> Drift -->
+  <path d="M 545 323 L 545 363" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="555" y="333" width="90" height="18" rx="4" fill="#0f172a"/>
+  <text class="edge-label" x="600" y="346" text-anchor="middle">ChangeReport</text>
+
+  <!-- [3 Drift Engine] -->
+  <g transform="translate(180, 363)" filter="url(#shadow)">
+    <rect width="730" height="96" rx="12" fill="#131b2e" stroke="#1e293b" stroke-width="1.5"/>
+    <rect x="0" y="0" width="6" height="96" rx="3" fill="url(#accent-emerald)"/>
+    <text class="node-title" x="24" y="30">[3 Drift Engine] Doc Anchor &amp; Impact Analysis</text>
+    <rect x="580" y="16" width="130" height="20" rx="10" fill="#047857" fill-opacity="0.25"/>
+    <text class="badge" x="645" y="30" text-anchor="middle" fill="#34d399">NO LLM · DETERMINISTIC</text>
+    <text class="node-desc" x="24" y="54">• Parse documentation sections and extract anchors via markdown-it-py</text>
+    <text class="node-desc" x="24" y="72">• Compute (changed_symbols ∩ doc_anchors) + fastembed cosine similarity fallback</text>
+  </g>
+
+  <!-- Flow Arrow: Drift -> Orchestrator -->
+  <path d="M 545 459 L 545 499" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="555" y="469" width="80" height="18" rx="4" fill="#0f172a"/>
+  <text class="edge-label" x="595" y="482" text-anchor="middle">DriftReport</text>
+
+  <!-- [4 Orchestrator Box] -->
+  <g transform="translate(60, 499)" filter="url(#shadow)">
+    <rect width="860" height="165" rx="14" fill="#101728" stroke="#334155" stroke-width="1.5"/>
+    <rect x="0" y="0" width="6" height="165" rx="3" fill="url(#accent-purple)"/>
+    
+    <text class="node-title" x="24" y="28">[4 Orchestrator] LangGraph State Machine</text>
+    <rect x="670" y="14" width="170" height="20" rx="10" fill="#6b21a8" fill-opacity="0.3"/>
+    <text class="badge" x="755" y="28" text-anchor="middle" fill="#c084fc">LANGGRAPH PIPELINE</text>
+
+    <!-- Sub-nodes inside Orchestrator -->
+    <!-- Planner -->
+    <g transform="translate(24, 48)">
+      <rect width="135" height="94" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+      <text class="node-title" x="67" y="30" text-anchor="middle" font-size="13">Planner</text>
+      <text class="node-desc" x="67" y="52" text-anchor="middle" font-size="11">Maps drift report</text>
+      <text class="node-desc" x="67" y="68" text-anchor="middle" font-size="11">to targeted edits</text>
+    </g>
+
+    <!-- Arrow Planner -> Writer -->
+    <path d="M 159 95 L 189 95" stroke="#a855f7" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+
+    <!-- Writer -->
+    <g transform="translate(193, 48)">
+      <rect width="135" height="94" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+      <text class="node-title" x="67" y="30" text-anchor="middle" font-size="13">Writer</text>
+      <text class="node-desc" x="67" y="52" text-anchor="middle" font-size="11">Rewrites docs &amp;</text>
+      <text class="node-desc" x="67" y="68" text-anchor="middle" font-size="11">walkthroughs</text>
+    </g>
+
+    <!-- Arrow Writer -> Verifier -->
+    <path d="M 328 95 L 358 95" stroke="#a855f7" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+
+    <!-- Verifier -->
+    <g transform="translate(362, 48)">
+      <rect width="135" height="94" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+      <text class="node-title" x="67" y="30" text-anchor="middle" font-size="13">Verifier</text>
+      <text class="node-desc" x="67" y="52" text-anchor="middle" font-size="11">Deterministic check:</text>
+      <text class="node-desc" x="67" y="68" text-anchor="middle" font-size="11">links, code fences</text>
+    </g>
+
+    <!-- Arrow Verifier -> Reviewer -->
+    <path d="M 497 95 L 527 95" stroke="#a855f7" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+
+    <!-- Reviewer -->
+    <g transform="translate(531, 48)">
+      <rect width="145" height="94" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+      <text class="node-title" x="72" y="30" text-anchor="middle" font-size="13">Reviewer</text>
+      <text class="node-desc" x="72" y="52" text-anchor="middle" font-size="11">LLM critique vs diff</text>
+      <text class="node-desc" x="72" y="68" text-anchor="middle" font-size="11">(approval gate)</text>
+    </g>
+
+    <!-- Feedback Arc Reviewer -> Writer -->
+    <path d="M 603 48 C 603 36, 260 36, 260 48" fill="none" stroke="#f43f5e" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#arrow)"/>
+    <text class="edge-label" x="430" y="34" text-anchor="middle" fill="#f43f5e" font-size="10">re-prompt on failure</text>
+
+    <!-- Arrow Reviewer -> Publisher -->
+    <path d="M 676 95 L 706 95" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
+
+    <!-- Publisher -->
+    <g transform="translate(710, 48)">
+      <rect width="130" height="94" rx="8" fill="#1e293b" stroke="#059669" stroke-width="1.5"/>
+      <text class="node-title" x="65" y="30" text-anchor="middle" font-size="13" fill="#34d399">Publisher</text>
+      <text class="node-desc" x="65" y="52" text-anchor="middle" font-size="11">Creates Evidence</text>
+      <text class="node-desc" x="65" y="68" text-anchor="middle" font-size="11">Table &amp; Opens PR</text>
+    </g>
+  </g>
+
+  <!-- Connectors Bottom -->
+  <!-- ContextStore Connector -->
+  <path d="M 280 664 L 280 704" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="235" y="674" width="90" height="18" rx="4" fill="#0f172a"/>
+  <text class="edge-label" x="280" y="687" text-anchor="middle" fill="#38bdf8">reads / writes</text>
+
+  <!-- GitHub PR Connector -->
+  <path d="M 775 664 L 775 704" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-emerald)"/>
+  <rect x="735" y="674" width="80" height="18" rx="4" fill="#0f172a"/>
+  <text class="edge-label" x="775" y="687" text-anchor="middle" fill="#34d399">opens PR</text>
+
+  <!-- [5 ContextStore] -->
+  <g transform="translate(60, 704)" filter="url(#shadow)">
+    <rect width="450" height="110" rx="12" fill="#131b2e" stroke="#1e293b" stroke-width="1.5"/>
+    <rect x="0" y="0" width="6" height="110" rx="3" fill="url(#accent-blue)"/>
+    <text class="node-title" x="24" y="28">[5 ContextStore] SQLite WAL Storage</text>
+    <rect x="340" y="14" width="95" height="18" rx="9" fill="#0369a1" fill-opacity="0.25"/>
+    <text class="badge" x="387" y="27" text-anchor="middle" fill="#38bdf8">AIOSQLITE</text>
+    <text class="node-desc" x="24" y="50">• code_doc_edges: symbol ↔ doc relationship graph</text>
+    <text class="node-desc" x="24" y="68">• webhook_deliveries: X-GitHub-Delivery idempotency store</text>
+    <text class="node-desc" x="24" y="86">• doc_embeddings &amp; run_traces: vector cache &amp; LangGraph state</text>
+  </g>
+
+  <!-- [GitHub Docs PR] -->
+  <g transform="translate(540, 704)" filter="url(#shadow)">
+    <rect width="380" height="110" rx="12" fill="#131b2e" stroke="#059669" stroke-width="1.5"/>
+    <rect x="0" y="0" width="6" height="110" rx="3" fill="url(#accent-emerald)"/>
+    <text class="node-title" x="24" y="28" fill="#34d399">GitHub Documentation PR</text>
+    <rect x="275" y="14" width="90" height="18" rx="9" fill="#047857" fill-opacity="0.3"/>
+    <text class="badge" x="320" y="27" text-anchor="middle" fill="#34d399">OUTPUT PR</text>
+    <text class="node-desc" x="24" y="50">• Automated branch creation &amp; committed doc edits</text>
+    <text class="node-desc" x="24" y="68">• Comprehensive Markdown Evidence Table in PR body</text>
+    <text class="node-desc" x="24" y="86">• Deterministically verified references &amp; valid links</text>
+  </g>
+</svg>

@@ -1,0 +1,93 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Environment variables & secrets
+.env
+.env.*
+*.env
+!.env.example
+secrets.json
+
+# SQLite & ContextStore databases
+*.db
+*.sqlite
+*.sqlite3
+*-journal
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Fastembed & Model caches
+.fastembed_cache/
+.cache/
+hf_cache/
+models/
+*.onnx
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+
+# Linting & Type Checking
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Logs & Temporary files
+*.log
+logs/
+tmp/
+temp/
+
+# IDEs & Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini

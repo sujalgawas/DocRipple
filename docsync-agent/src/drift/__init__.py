@@ -1,0 +1,1 @@
+"""Drift module — deterministic doc-drift detection (no LLM)."""
