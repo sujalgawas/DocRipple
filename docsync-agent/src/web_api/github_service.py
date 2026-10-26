@@ -172,6 +172,71 @@ class GitHubService:
             data = response.json()
         return _commit_summary(data)
 
+    async def list_repo_commits(
+        self,
+        repo_full_name: str,
+        branch: str | None = None,
+        per_page: int = 15,
+    ) -> list[dict]:
+        """Return recent commits from the GitHub REST API."""
+        params: dict[str, object] = {"per_page": per_page}
+        if branch:
+            params["sha"] = branch
+        async with self._client_ctx() as client:
+            response = await client.get(
+                self._url(f"/repos/{repo_full_name}/commits"),
+                headers=self._headers(),
+                params=params,
+            )
+            response.raise_for_status()
+            commits = response.json()
+
+        items = []
+        for item in commits:
+            summary = _commit_summary(item)
+            summary["html_url"] = item.get(
+                "html_url",
+                f"https://github.com/{repo_full_name}/commit/{item.get('sha')}",
+            )
+            author_data = item.get("author") or {}
+            summary["avatar_url"] = author_data.get("avatar_url", "")
+            items.append(summary)
+        return items
+
+    async def list_repo_pull_requests(
+        self,
+        repo_full_name: str,
+        state: str = "all",
+        per_page: int = 10,
+    ) -> list[dict]:
+        """Return recent pull requests from the GitHub REST API."""
+        async with self._client_ctx() as client:
+            response = await client.get(
+                self._url(f"/repos/{repo_full_name}/pulls"),
+                headers=self._headers(),
+                params={"state": state, "per_page": per_page},
+            )
+            if response.status_code != 200:
+                return []
+            pulls = response.json()
+
+        return [
+            {
+                "number": pr.get("number"),
+                "title": pr.get("title", ""),
+                "state": pr.get("state", "open"),
+                "merged": bool(pr.get("merged_at")),
+                "html_url": pr.get("html_url", ""),
+                "created_at": pr.get("created_at", ""),
+                "updated_at": pr.get("updated_at", ""),
+                "author": (pr.get("user") or {}).get("login", ""),
+                "avatar_url": (pr.get("user") or {}).get("avatar_url", ""),
+                "head_branch": (pr.get("head") or {}).get("ref", ""),
+                "base_branch": (pr.get("base") or {}).get("ref", "main"),
+            }
+            for pr in pulls
+        ]
+
     # ── Repository snapshots ────────────────────────────────────────────
 
     async def fetch_repo_snapshot(
@@ -570,7 +635,9 @@ def _commit_summary(data: dict) -> dict:
         "sha": data.get("sha", ""),
         "message": commit.get("message", ""),
         "author": author.get("login") or git_author.get("name") or "",
+        "avatar_url": author.get("avatar_url", ""),
         "date": git_author.get("date") or "",
+        "html_url": data.get("html_url", ""),
         "parent_sha": parents[0].get("sha", "") if parents else "",
     }
 
