@@ -185,14 +185,36 @@ LOG_LEVEL=INFO
 
 ### 3. Run the Application
 
+Start both the backend (FastAPI + Agent worker) and frontend (React/Vite dashboard) together with a single script from the root folder:
+
 ```bash
-# Start FastAPI application with live reload
-uv run uvicorn src.main:app --reload --port 8000
+# Windows PowerShell (Recommended on Windows):
+.\run.ps1
+
+# Cross-platform Python:
+python run.py
+
+# Windows Command Prompt / Double-click:
+run.bat
+
+# Linux / macOS / Bash:
+./run.sh
 ```
 
-The server is available at `http://localhost:8000`:
-- Swagger API Docs: `http://localhost:8000/docs`
-- Health check: `http://localhost:8000/health`
+Services will start concurrently:
+- **Backend & Agent Pipeline**: `http://localhost:8000` (API Docs: `http://localhost:8000/docs`, Health: `http://localhost:8000/health`)
+- **Frontend Dashboard**: `http://localhost:5173`
+
+Press `Ctrl+C` in your terminal to stop all services cleanly.
+
+*(Optional: Run services individually)*
+```bash
+# Backend only:
+cd docsync-agent && uv run uvicorn src.main:app --reload --port 8000
+
+# Frontend only:
+cd frontend && npm run dev
+```
 
 ### 4. Run the Test Suite
 
