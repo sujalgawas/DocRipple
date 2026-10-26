@@ -78,7 +78,15 @@ def extract_symbols_from_source(
     ext = os.path.splitext(file_path)[1].lower()
     lang = _LANG_BY_EXT.get(ext)
 
-    # ── Tree-sitter path ──
+    # ── Python ast primary path (fast, built-in, no C-ABI point corruption) ──
+    if ext == ".py":
+        try:
+            source_str = source if isinstance(source, str) else source.decode("utf-8")
+            return _extract_with_python_ast(source_str, file_path)
+        except Exception:
+            logger.debug("Python ast parsing failed for %s; trying tree-sitter", file_path, exc_info=True)
+
+    # ── Tree-sitter path for TypeScript, JavaScript, Go, Rust ──
     if lang is not None:
         try:
             return _extract_with_tree_sitter(source, lang, file_path)
@@ -89,14 +97,6 @@ def extract_symbols_from_source(
                 lang,
                 exc_info=True,
             )
-
-    # ── Python ast fallback ──
-    if ext == ".py":
-        try:
-            source_str = source if isinstance(source, str) else source.decode("utf-8")
-            return _extract_with_python_ast(source_str, file_path)
-        except Exception:
-            logger.debug("Python ast fallback also failed for %s", file_path, exc_info=True)
 
     return []
 
@@ -166,12 +166,15 @@ def _node_to_span(
     if _has_route_decorator(decorators):
         kind = "route"
 
+    start_line = source_bytes.count(b"\n", 0, node.start_byte) + 1
+    end_line = source_bytes.count(b"\n", 0, node.end_byte) + 1
+
     return ExtractedSymbolSpan(
         name=name_text,
         kind=kind,
         signature=sig_first_line,
-        start_line=node.start_point.row + 1,
-        end_line=node.end_point.row + 1,
+        start_line=start_line,
+        end_line=end_line,
         decorators=decorators,
     )
 
@@ -182,13 +185,18 @@ def _collect_decorators(
     decorator_types: set[str],
 ) -> None:
     """Walk previous siblings / parent children for decorator nodes."""
-    # For Python, decorators are previous named siblings of the decorated node.
-    # For TS/JS, decorators may be children of the function/class node.
-    if node.parent is not None:
-        for child in node.parent.named_children:
+    for child in getattr(node, "named_children", []):
+        if child.type in decorator_types:
+            text = child.text.decode("utf-8") if child.text else ""
+            if text:
+                decorators.append(text)
+    parent = getattr(node, "parent", None)
+    if parent is not None and parent.type in {"decorated_definition", "export_statement"}:
+        for child in parent.named_children:
             if child.type in decorator_types:
                 text = child.text.decode("utf-8") if child.text else ""
-                decorators.append(text)
+                if text:
+                    decorators.append(text)
 
 
 def _has_route_decorator(decorators: list[str]) -> bool:
