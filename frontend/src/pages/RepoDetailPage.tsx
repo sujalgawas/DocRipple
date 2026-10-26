@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import {
   GitBranch,
@@ -14,23 +14,87 @@ import {
   Loader2,
   X,
   ShieldCheck,
+  RefreshCw,
+  AlertCircle,
 } from "lucide-react";
 import {
   getRepoSkill,
   getRepoMemory,
   executeDemoRun,
+  getActivity,
+  getDashboard,
+  triggerRepo,
 } from "../services/api";
 import type {
   DocStyleSkill,
   RepoMemoryMap,
   DemoRunResponse,
+  ActivityRun,
+  MonitoredRepo,
+  RunStatus,
 } from "../services/api";
+
+const STATUS_META: Record<
+  RunStatus,
+  { label: string; pill: string; dot: string }
+> = {
+  running: {
+    label: "running",
+    pill: "border-amber-500/30 bg-amber-500/10 text-amber-300",
+    dot: "bg-amber-400",
+  },
+  no_drift: {
+    label: "no drift",
+    pill: "border-[#26231D] bg-[#1F1D18] text-[#8E897F]",
+    dot: "bg-[#8E897F]",
+  },
+  pr_open: {
+    label: "PR open",
+    pill: "border-accent-orange/30 bg-accent-orange/10 text-accent-orange",
+    dot: "bg-accent-orange",
+  },
+  merged: {
+    label: "merged",
+    pill: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400",
+    dot: "bg-emerald-400",
+  },
+  failed: {
+    label: "failed",
+    pill: "border-red-500/30 bg-red-500/10 text-red-400",
+    dot: "bg-red-400",
+  },
+};
+
+function relativeTime(value?: string | null): string {
+  if (!value) return "just now";
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return "just now";
+
+  const seconds = Math.max(1, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "yesterday";
+  if (days < 7) return `${days} days ago`;
+  return new Date(value).toLocaleDateString();
+}
 
 export const RepoDetailPage: React.FC = () => {
   const { owner = "sujalgawas", repo = "DocRipple" } = useParams();
   const repoFullName = `${owner}/${repo}`;
 
   const [activeTab, setActiveTab] = useState<"overview" | "skill" | "memory">("overview");
+
+  // Overview: real pipeline runs and repository metadata
+  const [runs, setRuns] = useState<ActivityRun[]>([]);
+  const [monitoredRepo, setMonitoredRepo] = useState<MonitoredRepo | null>(null);
+  const [loadingRuns, setLoadingRuns] = useState(true);
+  const [runsError, setRunsError] = useState<string | null>(null);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
 
   // Tab 2: Skill data
   const [skill, setSkill] = useState<DocStyleSkill | null>(null);
@@ -52,6 +116,56 @@ export const RepoDetailPage: React.FC = () => {
   );
   const [simLoading, setSimLoading] = useState(false);
   const [simResult, setSimResult] = useState<DemoRunResponse | null>(null);
+  const [simError, setSimError] = useState<string | null>(null);
+
+  const loadRuns = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoadingRuns(true);
+
+      const [activityResult, dashboardResult] = await Promise.allSettled([
+        getActivity(repoFullName),
+        getDashboard(),
+      ]);
+
+      if (activityResult.status === "fulfilled") {
+        setRuns(activityResult.value.runs);
+        setRunsError(null);
+      } else {
+        setRunsError(
+          activityResult.reason instanceof Error
+            ? activityResult.reason.message
+            : "Could not load execution history"
+        );
+      }
+
+      if (dashboardResult.status === "fulfilled") {
+        setMonitoredRepo(
+          dashboardResult.value.repositories.find(
+            (item) => item.repo_full_name === repoFullName
+          ) ?? null
+        );
+      }
+
+      if (!silent) setLoadingRuns(false);
+    },
+    [repoFullName]
+  );
+
+  useEffect(() => {
+    void loadRuns();
+  }, [loadRuns]);
+
+  const hasRunning = runs.some((run) => run.status === "running");
+
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => {
+        void loadRuns(true);
+      },
+      hasRunning ? 4000 : 15000
+    );
+    return () => window.clearInterval(timer);
+  }, [hasRunning, loadRuns]);
 
   // Load Tab 2 data
   useEffect(() => {
@@ -81,9 +195,31 @@ export const RepoDetailPage: React.FC = () => {
     }
   };
 
+  const handleSyncLatest = async () => {
+    setSyncing(true);
+    setRunsError(null);
+    setSyncNotice(null);
+    try {
+      const result = await triggerRepo(owner, repo);
+      setSyncNotice(
+        `Queued ${result.commit_sha.slice(0, 7)} on ${result.branch}. History refreshes as the run progresses.`
+      );
+      window.setTimeout(() => {
+        void loadRuns(true);
+      }, 1500);
+    } catch (err) {
+      setRunsError(
+        err instanceof Error ? err.message : "Could not sync the latest commit"
+      );
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const handleRunSimulation = async () => {
     setSimLoading(true);
     setSimResult(null);
+    setSimError(null);
     try {
       const res = await executeDemoRun({
         delivery_id: `sim-${Date.now().toString(36)}`,
@@ -93,45 +229,26 @@ export const RepoDetailPage: React.FC = () => {
       });
       setSimResult(res);
     } catch (err) {
-      console.error("Simulation error:", err);
-      // Fallback response for UI demo if backend demo endpoint is unreachable
-      setSimResult({
-        delivery_id: `sim-${Date.now().toString(36)}`,
-        change_report: {
-          changed_symbols: [
-            {
-              symbol_name: "calc_total",
-              symbol_kind: "function",
-              change_class: "api_surface",
-              change_type: "modified",
-              old_signature: "def calc_total(items: list[int]) -> int",
-              new_signature: "def calc_total(items: list[int], tax_rate: float = 0.05) -> int",
-            },
-          ],
-        },
-        drift_report: {
-          impacted_sections: [
-            {
-              doc_path: "README.md",
-              heading: "Billing",
-              anchor: "billing",
-              matched_symbols: ["calc_total"],
-              match_method: "exact_anchor",
-            },
-          ],
-        },
-        publish_result: {
-          pr_url: `https://github.com/${repoFullName}/pull/101`,
-          pr_number: 101,
-          verification_status: "passed",
-          evidence_table_md:
-            "| doc_file | section | changed_symbol | change_class | match_method | verification |\n| --- | --- | --- | --- | --- | --- |\n| README.md | Billing | calc_total | api_surface | exact_anchor | passed |",
-        },
-      });
+      setSimError(
+        err instanceof Error ? err.message : "Simulation request failed"
+      );
     } finally {
       setSimLoading(false);
     }
   };
+
+  const totalRuns = runs.length;
+  const noDriftRuns = runs.filter((run) => run.status === "no_drift").length;
+  const docsPrs = runs.filter(
+    (run) => run.pr_number !== null || Boolean(run.pr_url)
+  ).length;
+  const totalLlmCalls = runs.reduce(
+    (sum, run) => sum + (run.llm_calls ?? 0),
+    0
+  );
+  const watchBranch = monitoredRepo?.watch_branch ?? "main";
+  const isListening = monitoredRepo?.status === "listening";
+  const repoStatusLabel = monitoredRepo ? monitoredRepo.status : "not connected";
 
   return (
     <div className="p-8 lg:p-12 max-w-6xl">
@@ -151,11 +268,21 @@ export const RepoDetailPage: React.FC = () => {
             <span className="font-mono text-xs text-[#8E897F]">{owner} /</span>
             <span className="font-mono text-xs px-2 py-0.5 rounded border border-[#26231D] bg-[#141310] text-[#8E897F] flex items-center gap-1">
               <GitBranch className="w-3 h-3" />
-              main
+              {watchBranch}
             </span>
-            <span className="font-mono text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              listening
+            <span
+              className={`font-mono text-xs px-2 py-0.5 rounded border flex items-center gap-1 ${
+                isListening
+                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                  : "bg-amber-500/10 text-amber-300 border-amber-500/20"
+              }`}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  isListening ? "bg-emerald-400" : "bg-amber-400"
+                }`}
+              />
+              {repoStatusLabel}
             </span>
           </div>
 
@@ -164,18 +291,54 @@ export const RepoDetailPage: React.FC = () => {
           </h1>
         </div>
 
-        {/* Primary Action Button */}
-        <div className="flex items-center gap-3">
+        {/* Primary Actions */}
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            disabled={syncing}
+            onClick={() => void handleSyncLatest()}
+            className="bg-accent-orange hover:bg-accent-orange-hover text-black font-medium px-4 py-2.5 rounded-lg text-sm flex items-center gap-2 transition-colors shadow-sm font-sans disabled:opacity-60"
+          >
+            {syncing ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+            <span>{syncing ? "Syncing..." : "Sync latest commit"}</span>
+          </button>
           <button
             type="button"
             onClick={() => setShowSimulateModal(true)}
-            className="bg-accent-orange hover:bg-accent-orange-hover text-black font-medium px-4 py-2.5 rounded-lg text-sm flex items-center gap-2 transition-colors shadow-sm font-sans"
+            className="border border-[#3A352C] bg-[#1F1D18] hover:bg-[#2A2720] hover:border-accent-orange/60 text-[#F5F2EB] font-medium px-4 py-2.5 rounded-lg text-sm flex items-center gap-2 transition-colors font-sans"
           >
             <Play className="w-4 h-4 fill-current stroke-none" />
             <span>Simulate Drift Run</span>
           </button>
         </div>
       </div>
+
+      {syncNotice && (
+        <div className="mb-6 border border-emerald-900/50 bg-emerald-950/20 text-emerald-300 rounded-xl px-4 py-3 text-sm flex items-start gap-2">
+          <Check className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{syncNotice}</span>
+        </div>
+      )}
+
+      {runsError && (
+        <div className="mb-6 border border-red-900/50 bg-red-950/20 text-red-300 rounded-xl px-4 py-3 text-sm flex items-start justify-between gap-3">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{runsError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadRuns()}
+            className="font-mono text-xs underline hover:text-[#F5F2EB] shrink-0"
+          >
+            retry
+          </button>
+        </div>
+      )}
 
       {/* Navigation Tabs */}
       <div className="flex items-center gap-2 border-b border-[#26231D] mb-8 font-mono text-xs">
@@ -225,107 +388,176 @@ export const RepoDetailPage: React.FC = () => {
           {/* Metrics */}
           <div className="grid grid-cols-1 sm:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-[#26231D] border border-[#26231D] rounded-xl bg-[#141310] overflow-hidden">
             <div className="p-4">
-              <span className="font-mono text-xs text-[#8E897F] block mb-1">Total Webhooks</span>
-              <span className="font-serif text-3xl text-[#F5F2EB]">128</span>
+              <span className="font-mono text-xs text-[#8E897F] block mb-1">Total Runs</span>
+              <span className="font-serif text-3xl text-[#F5F2EB]">
+                {loadingRuns && runs.length === 0 ? "…" : totalRuns}
+              </span>
             </div>
             <div className="p-4">
-              <span className="font-mono text-xs text-[#8E897F] block mb-1">AST Skipped (0 tokens)</span>
-              <span className="font-serif text-3xl text-[#F5F2EB]">89</span>
+              <span className="font-mono text-xs text-[#8E897F] block mb-1">No Drift (0 tokens)</span>
+              <span className="font-serif text-3xl text-[#F5F2EB]">{noDriftRuns}</span>
             </div>
             <div className="p-4">
               <span className="font-mono text-xs text-[#8E897F] block mb-1">Documentation PRs</span>
-              <span className="font-serif text-3xl text-[#F5F2EB]">39</span>
+              <span className="font-serif text-3xl text-[#F5F2EB]">{docsPrs}</span>
             </div>
             <div className="p-4">
-              <span className="font-mono text-xs text-[#8E897F] block mb-1">Avg Verification Time</span>
-              <span className="font-serif text-3xl text-emerald-400">0.8s</span>
+              <span className="font-mono text-xs text-[#8E897F] block mb-1">LLM Calls</span>
+              <span className="font-serif text-3xl text-emerald-400">{totalLlmCalls}</span>
             </div>
           </div>
 
           {/* Runs history */}
           <div>
-            <h2 className="font-serif text-2xl text-[#F5F2EB] mb-4">Execution History</h2>
-            <div className="flex flex-col gap-3">
-              {[
-                {
-                  id: "run-e2e-1",
-                  status: "PR open",
-                  statusClass: "border-accent-orange/30 bg-accent-orange/10 text-accent-orange",
-                  title: "feat(billing): add tax_rate parameter to calc_total",
-                  sha: "a3f9c21",
-                  time: "4 minutes ago",
-                  symbols: ["calc_total (api_surface)"],
-                  doc: "README.md # Billing",
-                  prNumber: 101,
-                  prUrl: `https://github.com/${repoFullName}/pull/101`,
-                },
-                {
-                  id: "run-e2e-2",
-                  status: "no drift",
-                  statusClass: "border-[#26231D] bg-[#1F1D18] text-[#8E897F]",
-                  title: "refactor: optimize internal diff parser hunk extraction",
-                  sha: "7be02d4",
-                  time: "38 minutes ago",
-                  symbols: ["_parse_hunk (behavior)"],
-                  doc: "No doc sections impacted (0 LLM tokens)",
-                  prNumber: null,
-                  prUrl: null,
-                },
-                {
-                  id: "run-e2e-3",
-                  status: "merged",
-                  statusClass: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400",
-                  title: "docs(cli): document --dry-run argument",
-                  sha: "c19e8f0",
-                  time: "2 hours ago",
-                  symbols: ["--dry-run (cli)"],
-                  doc: "docs/cli.md # Flags",
-                  prNumber: 98,
-                  prUrl: `https://github.com/${repoFullName}/pull/98`,
-                },
-              ].map((r) => (
-                <div
-                  key={r.id}
-                  className="border border-[#26231D] bg-[#141310] rounded-xl p-5 flex flex-col gap-3"
-                >
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-3">
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-mono border ${r.statusClass}`}>
-                        {r.status}
-                      </span>
-                      <span className="text-sm font-medium text-[#F5F2EB]">{r.title}</span>
-                    </div>
-                    <span className="font-mono text-xs text-[#8E897F]">{r.time}</span>
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-between gap-4 text-xs font-mono pt-2 border-t border-[#26231D]/60 text-[#8E897F]">
-                    <div className="flex items-center gap-2">
-                      <span>Changed AST:</span>
-                      {r.symbols.map((s) => (
-                        <span key={s} className="bg-[#1F1D18] text-[#F5F2EB] px-2 py-0.5 rounded border border-[#26231D]">
-                          {s}
-                        </span>
-                      ))}
-                      <span>→</span>
-                      <span className="text-accent-orange">{r.doc}</span>
-                    </div>
-
-                    {r.prNumber && (
-                      <a
-                        href={r.prUrl || "#"}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1.5 text-accent-orange hover:text-accent-orange-hover"
-                      >
-                        <GitPullRequest className="w-3.5 h-3.5" />
-                        <span>Docs PR #{r.prNumber}</span>
-                        <ExternalLink className="w-3 h-3" />
-                      </a>
-                    )}
-                  </div>
-                </div>
-              ))}
+            <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
+              <div>
+                <h2 className="font-serif text-2xl text-[#F5F2EB]">Execution History</h2>
+                <p className="font-mono text-xs text-[#8E897F] mt-1">
+                  Real pipeline runs for {repoFullName}
+                  {hasRunning ? " · live polling" : ""}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadRuns()}
+                className="border border-[#26231D] bg-[#1F1D18] hover:bg-[#2A2720] text-[#F5F2EB] px-3 py-1.5 rounded-lg text-xs font-mono flex items-center gap-1.5 transition-colors"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${loadingRuns ? "animate-spin" : ""}`}
+                />
+                <span>Refresh</span>
+              </button>
             </div>
+
+            {loadingRuns ? (
+              <div className="border border-[#26231D] bg-[#141310] rounded-xl p-6 flex items-center gap-2 text-xs font-mono text-[#8E897F]">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Loading execution history...</span>
+              </div>
+            ) : runs.length === 0 ? (
+              <div className="border border-dashed border-[#26231D] rounded-xl p-8 text-center">
+                <p className="text-sm text-[#8E897F] mb-1">
+                  No pipeline runs for this repository yet.
+                </p>
+                <p className="font-mono text-xs text-[#8E897F]/70 mb-4">
+                  Sync the latest GitHub commit to start the first run.
+                </p>
+                <button
+                  type="button"
+                  disabled={syncing}
+                  onClick={() => void handleSyncLatest()}
+                  className="bg-accent-orange hover:bg-accent-orange-hover text-black font-medium px-4 py-2 rounded-lg text-sm inline-flex items-center gap-2 transition-colors disabled:opacity-60"
+                >
+                  {syncing ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4" />
+                  )}
+                  <span>{syncing ? "Syncing..." : "Sync latest commit"}</span>
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {runs.map((run) => {
+                  const status = STATUS_META[run.status];
+                  const symbols = run.diff_preview?.changed_symbols ?? [];
+                  const sections = run.diff_preview?.impacted_sections ?? [];
+                  const title =
+                    (run.commit_message || "").split("\n")[0].trim() ||
+                    `Docs sync at ${(run.commit_sha || "unknown").slice(0, 7)}`;
+                  const docTarget =
+                    sections.length > 0
+                      ? `${sections[0].doc_path} # ${sections[0].heading}${
+                          sections.length > 1
+                            ? ` +${sections.length - 1} more`
+                            : ""
+                        }`
+                      : run.status === "no_drift"
+                      ? "No doc sections impacted (0 LLM tokens)"
+                      : "No doc sections impacted";
+                  const shortSha = run.commit_sha
+                    ? run.commit_sha.slice(0, 7)
+                    : "—";
+
+                  return (
+                    <div
+                      key={run.delivery_id}
+                      className="border border-[#26231D] bg-[#141310] rounded-xl p-5 flex flex-col gap-3"
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="flex items-start sm:items-center gap-3 min-w-0">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-xs font-mono border flex items-center gap-1.5 shrink-0 ${status.pill}`}
+                          >
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${status.dot}`}
+                            />
+                            {status.label}
+                          </span>
+                          <span className="text-sm font-medium text-[#F5F2EB] truncate">
+                            {title}
+                          </span>
+                        </div>
+                        <span className="font-mono text-xs text-[#8E897F] shrink-0">
+                          {run.llm_calls ?? 0} LLM calls ·{" "}
+                          {relativeTime(run.created_at)}
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-4 text-xs font-mono pt-2 border-t border-[#26231D]/60 text-[#8E897F]">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span>Changed AST:</span>
+                          {symbols.length > 0 ? (
+                            symbols.map((symbol, index) => (
+                              <span
+                                key={`${symbol.symbol_name}-${index}`}
+                                className="bg-[#1F1D18] text-[#F5F2EB] px-2 py-0.5 rounded border border-[#26231D]"
+                              >
+                                {symbol.symbol_name} ({symbol.change_class})
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-[#8E897F]/70">
+                              no public symbols
+                            </span>
+                          )}
+                          <span>→</span>
+                          <span className="text-accent-orange">{docTarget}</span>
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          {run.commit_sha && (
+                            <a
+                              href={`https://github.com/${run.repo_full_name}/commit/${run.commit_sha}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 text-[#8E897F] hover:text-[#F5F2EB] transition-colors"
+                              title={run.commit_sha}
+                            >
+                              <span>{shortSha}</span>
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
+                          )}
+                          {run.author && <span>@{run.author}</span>}
+                          {run.pr_number && run.pr_url && (
+                            <a
+                              href={run.pr_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1.5 text-accent-orange hover:text-accent-orange-hover"
+                            >
+                              <GitPullRequest className="w-3.5 h-3.5" />
+                              <span>Docs PR #{run.pr_number}</span>
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -570,6 +802,13 @@ export const RepoDetailPage: React.FC = () => {
                   )}
                 </button>
               </div>
+
+              {simError && (
+                <div className="border border-red-900/50 bg-red-950/20 text-red-300 rounded-xl px-4 py-3 text-xs flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                  <span>{simError}</span>
+                </div>
+              )}
 
               {/* Simulation Result */}
               {simResult && (
