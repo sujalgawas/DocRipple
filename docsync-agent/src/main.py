@@ -19,6 +19,8 @@ from src.context_store.sqlite_store import SqliteContextStore
 from src.contracts.schemas import ChangeReport, DriftReport, PublishResult, WebhookJob
 from src.drift.service import DriftEngineService
 from src.ingest.router import router as ingest_router
+from src.onboarding.router import router as onboarding_router
+from src.onboarding.service import OnboardingService
 from src.orchestrator.config import OrchestratorConfig
 from src.orchestrator.service import OrchestratorService
 from src.pipeline import BackgroundQueueWorker, DocSyncPipeline, GitHubRepoFetcher
@@ -42,6 +44,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 3. Domain module services
     analyzer = ChangeAnalyzerService()
     drift_engine = DriftEngineService()
+    onboarding_service = OnboardingService(context_store=store)
     orchestrator_config = OrchestratorConfig(
         llm_base_url=settings.LLM_BASE_URL,
         llm_api_key=settings.LLM_API_KEY,
@@ -70,6 +73,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Attach to app.state
     app.state.webhook_queue = queue
     app.state.context_store = store
+    app.state.onboarding_service = onboarding_service
     app.state.pipeline = pipeline
     app.state.worker = worker
     app.state.settings = settings
@@ -84,6 +88,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("DocSync shutdown complete")
 
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(
     title="DocSync Agent",
     description="Autonomous Documentation Drift Detection & Remediation",
@@ -91,8 +97,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Mount ingest webhook router
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Mount Stage 1 webhook router and Stage 0 onboarding router
 app.include_router(ingest_router)
+app.include_router(onboarding_router)
 
 
 # ── Observability & Demo Endpoints ──────────────────────────────────────────
