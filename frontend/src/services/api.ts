@@ -208,6 +208,8 @@ export interface ConnectRepoPayload {
   watch_branch: string;
   doc_paths: string[];
   drift_action: string;
+  /** Analyze the newest commit immediately instead of using it as the baseline. */
+  analyze_latest?: boolean;
 }
 
 export interface ConnectRepoResponse {

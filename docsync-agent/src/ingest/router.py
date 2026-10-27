@@ -72,18 +72,19 @@ async def github_webhook(
         )
 
     # 2. A cold-started Vercel container has an empty /tmp database. Re-register
-    #    the repository instead of dropping its webhook.
-    should_process = await _ensure_monitored_repo(store, repo_full_name, branch)
-
-    if not should_process:
-        logger.info(
-            "Ignoring webhook for paused/unmonitored repo %s (delivery %s)",
-            repo_full_name,
-            x_github_delivery,
-        )
-        return WebhookAckResponse(
-            status="event_ignored", delivery_id=x_github_delivery
-        )
+    #    the repository instead of dropping its webhook. Only push/PR events can
+    #    be about a repository we should track.
+    if x_github_event in ("push", "pull_request"):
+        should_process = await _ensure_monitored_repo(store, repo_full_name, branch)
+        if not should_process:
+            logger.info(
+                "Ignoring webhook for paused repo %s (delivery %s)",
+                repo_full_name,
+                x_github_delivery,
+            )
+            return WebhookAckResponse(
+                status="event_ignored", delivery_id=x_github_delivery
+            )
 
     pipeline = getattr(request.app.state, "pipeline", None)
     run_inline = pipeline is not None

@@ -47,6 +47,7 @@ export const AddRepositoryPage: React.FC = () => {
   const [watchBranch, setWatchBranch] = useState("main");
   const [docPaths, setDocPaths] = useState("README.md, docs/**/*.md");
   const [driftAction, setDriftAction] = useState("Open a pull request");
+  const [analyzeLatest, setAnalyzeLatest] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
 
@@ -115,6 +116,7 @@ export const AddRepositoryPage: React.FC = () => {
         watch_branch: watchBranch.trim() || "main",
         doc_paths: paths.length > 0 ? paths : ["README.md", "docs/**/*.md"],
         drift_action: driftAction,
+        analyze_latest: analyzeLatest,
       });
       setResult(response);
       setStep(3);
@@ -460,6 +462,22 @@ export const AddRepositoryPage: React.FC = () => {
                 </option>
               </select>
             </div>
+
+            {/* Analyze latest commit */}
+            <label className="flex items-start gap-2.5 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={analyzeLatest}
+                onChange={(e) => setAnalyzeLatest(e.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-[#F5A623]"
+              />
+              <span className="font-mono text-xs text-[#8E897F]">
+                Analyze the latest commit now
+                <span className="block mt-0.5 text-[#8E897F]/70">
+                  Off: new commits are detected automatically from now on.
+                </span>
+              </span>
+            </label>
           </div>
 
           {/* Actions */}
