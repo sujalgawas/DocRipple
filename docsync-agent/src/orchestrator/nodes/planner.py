@@ -29,12 +29,12 @@ def build_planner_node(llm_client: LLMClientProtocol | None = None):
         all_changed = change_report.changed_symbols if change_report else []
         subgraph: RepoMemoryMap | None = state.get("memory_subgraph")
 
-        # Sort impacted sections by confidence descending and cap at top 2
+        # Sort impacted sections by confidence descending and cap at top 1
         sorted_sections = sorted(
             drift.impacted_sections,
             key=lambda s: getattr(s, "confidence", 0.0),
             reverse=True,
-        )[:2]
+        )[:1]
 
         memory_context = _format_memory_context(subgraph) if subgraph else ""
 

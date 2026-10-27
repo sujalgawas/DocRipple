@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -58,7 +59,8 @@ def build_writer_node(llm_client: LLMClientProtocol):
                 )
 
         new_drafts: list[SectionDraft] = []
-        capped_plans = edit_plans[:2]
+        # Cap to top 1 highest-confidence section so writer makes only 1 LLM call total
+        capped_plans = edit_plans[:1]
 
         for plan in capped_plans:
             doc_path = plan.doc_path
@@ -109,7 +111,10 @@ CRITICAL VERIFICATION RULES (MUST FOLLOW ON ATTEMPT 1):
 Output ONLY the rewritten section content as valid Markdown. Do not include the heading line itself."""
 
             try:
-                new_section = await llm_client.generate_text(system_prompt, user_prompt)
+                new_section = await asyncio.wait_for(
+                    llm_client.generate_text(system_prompt, user_prompt),
+                    timeout=20.0,
+                )
 
                 # Splice the new section back into the doc
                 spliced = _splice_section(current_content, heading, new_section)
@@ -137,21 +142,72 @@ Output ONLY the rewritten section content as valid Markdown. Do not include the 
                 )
                 logger.info("Writer updated %s#%s", doc_path, heading)
 
-            except Exception:
-                logger.exception("Writer failed for %s#%s", doc_path, heading)
-                # Keep original content on failure
+            except Exception as exc:
+                logger.warning(
+                    "Writer LLM failed or timed out for %s#%s (%s: %s); applying deterministic fallback",
+                    doc_path,
+                    heading,
+                    exc.__class__.__name__,
+                    exc,
+                )
+                fallback_section = _build_deterministic_fallback_section(
+                    section_md, plan.target_symbols, changed_symbols
+                )
+                spliced = _splice_section(current_content, heading, fallback_section)
+                updated_docs[doc_path] = spliced
+
+                evidence = [
+                    EvidenceRow(
+                        doc_file=doc_path,
+                        section=heading,
+                        changed_symbol=s_name,
+                        change_class=cs.change_class if (cs := _find_symbol(changed_symbols, s_name)) else "",
+                        match_method=sec.match_method if (sec := _find_section(drift.impacted_sections, doc_path, heading)) else "graph_edge",
+                        verification="pending",
+                    )
+                    for s_name in plan.target_symbols
+                ]
+
                 new_drafts.append(
                     SectionDraft(
                         doc_path=doc_path,
                         heading=heading,
-                        updated_markdown=section_md,
-                        evidence=[],
+                        updated_markdown=fallback_section,
+                        evidence=evidence,
                     )
                 )
 
         return {"drafts": new_drafts, "updated_docs": updated_docs}
 
     return writer_node
+
+
+def _build_deterministic_fallback_section(
+    original_section_md: str,
+    target_symbols: list[str],
+    changed_symbols: list,
+) -> str:
+    """Build a clean deterministic Markdown block when LLM times out or fails."""
+    lines = original_section_md.split("\n")
+    if lines and lines[0].lstrip().startswith("#"):
+        base_content = "\n".join(lines[1:]).strip()
+    else:
+        base_content = original_section_md.strip()
+
+    updates: list[str] = []
+    for s_name in target_symbols:
+        cs = _find_symbol(changed_symbols, s_name)
+        if cs:
+            sig = f"\n```python\n{cs.new_signature}\n```" if cs.new_signature else f"`{s_name}`"
+            diff = f"\n> *Change ({cs.change_type})*: {cs.diff_hunk[:150]}" if cs.diff_hunk else ""
+            updates.append(f"### `{cs.symbol_name}` ({cs.symbol_kind})\n{sig}{diff}\n")
+        else:
+            updates.append(f"- `{s_name}`: Updated according to code changes.\n")
+
+    update_block = "\n".join(updates).strip()
+    if base_content:
+        return f"{base_content}\n\n#### Recent Code Updates\n\n{update_block}"
+    return f"#### Recent Code Updates\n\n{update_block}"
 
 
 def _extract_section(content: str, heading: str) -> str:

@@ -158,67 +158,74 @@ async def test_client_has_zero_retries_and_timeout_15():
 
 
 @pytest.mark.asyncio
-async def test_gemma_combines_system_and_user_messages():
-    """Verify Gemma models combine system_prompt and user_prompt into a single user role."""
+async def test_gemma_uses_native_google_generate_content():
+    """Verify Google/Gemma uses native v1beta/models/{model}:generateContent with combined prompts."""
+    import httpx
+
     client = OpenAICompatibleLLMClient(
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        api_key="gemini-key",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+        api_key="AIzaSyDummyKey",
         model="gemma-3-27b-it",
     )
-    mock_resp = _make_mock_response("gemma reply")
-    with patch.object(
-        client._client.chat.completions,
-        "create",
-        new=AsyncMock(return_value=mock_resp),
-    ) as mock_create:
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "candidates": [
+            {"content": {"parts": [{"text": "native google response"}]}}
+        ]
+    }
+    with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_resp)) as mock_post:
         result = await client.generate_text("System instruction", "User query")
-        assert result == "gemma reply"
-        mock_create.assert_awaited_once()
-        call_kwargs = mock_create.call_args.kwargs
-        messages = call_kwargs["messages"]
-        assert len(messages) == 1
-        assert messages[0]["role"] == "user"
-        assert "System instruction\n\n---\n\nUser query" == messages[0]["content"]
+        assert result == "native google response"
+        mock_post.assert_awaited_once()
+        url = mock_post.call_args[0][0]
+        assert "generativelanguage.googleapis.com/v1beta/models/gemma-3-27b-it:generateContent" in url
+        assert "key=AIzaSyDummyKey" in url
+        payload = mock_post.call_args.kwargs["json"]
+        parts = payload["contents"][0]["parts"]
+        assert parts[0]["text"] == "System instruction\n\n---\n\nUser query"
 
 
 @pytest.mark.asyncio
-async def test_gemma_multi_model_zero_sleep_fallback_on_429():
-    """Verify 429 on gemma-3-27b-it immediately retries with gemma-3-12b-it with zero sleep."""
+async def test_gemma_native_multi_model_fallback():
+    """Verify first model failure triggers zero-sleep fallback to next Google candidate."""
+    import httpx
+
     client = OpenAICompatibleLLMClient(
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        api_key="gemini-key",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+        api_key="AIzaSyDummyKey",
         model="gemma-3-27b-it",
     )
+    fail_resp = MagicMock()
+    fail_resp.status_code = 404
 
-    mock_429_resp = MagicMock()
-    mock_429_resp.status_code = 429
-    mock_429_resp.headers = {}
-    mock_429_resp.json.return_value = {"error": {"message": "Resource exhausted / Rate limit"}}
-    error_429 = APIStatusError("429 Rate limit", response=mock_429_resp, body=mock_429_resp.json.return_value)
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {
+        "candidates": [
+            {"content": {"parts": [{"text": "gemma-3-12b-it response"}]}}
+        ]
+    }
 
-    success_resp = _make_mock_response("fallback model response")
+    called_urls = []
 
-    call_models = []
+    async def mock_post(url, *args, **kwargs):
+        called_urls.append(url)
+        if "gemma-3-27b-it" in url:
+            raise httpx.HTTPStatusError("Not found", request=MagicMock(), response=fail_resp)
+        return ok_resp
 
-    async def mock_call(*args, **kwargs):
-        call_models.append(kwargs["model"])
-        if kwargs["model"] == "gemma-3-27b-it":
-            raise error_429
-        return success_resp
-
-    with patch.object(
-        client._client.chat.completions,
-        "create",
-        side_effect=mock_call,
-    ):
+    with patch("httpx.AsyncClient.post", side_effect=mock_post):
         result = await client.generate_text("System", "User")
-        assert result == "fallback model response"
-        assert call_models == ["gemma-3-27b-it", "gemma-3-12b-it"]
+        assert result == "gemma-3-12b-it response"
+        assert len(called_urls) == 2
+        assert "gemma-3-27b-it" in called_urls[0]
+        assert "gemma-3-12b-it" in called_urls[1]
 
 
 @pytest.mark.asyncio
-async def test_planner_is_deterministic_and_caps_at_two():
-    """Verify planner node makes 0 LLM calls and caps at top 2 impacted sections."""
+async def test_planner_is_deterministic_and_caps_at_one():
+    """Verify planner node makes 0 LLM calls and caps at top 1 impacted section."""
     huge_diff = "A" * 5000
     changed_symbols = [
         ChangedSymbol(
@@ -265,11 +272,73 @@ async def test_planner_is_deterministic_and_caps_at_two():
         "full_docs": {"README.md": "Overview content"},
     }
     result = await planner(state)
-    # Capped at top 2 most impacted sections
-    assert len(result["edit_plans"]) == 2
-    # Sorted by confidence descending: Section_3 (0.8) and Section_2 (0.7)
+    # Capped at top 1 most impacted section
+    assert len(result["edit_plans"]) == 1
+    # Sorted by confidence descending: Section_3 (0.8)
     assert result["edit_plans"][0].heading == "Section_3"
-    assert result["edit_plans"][1].heading == "Section_2"
     # Instructions contain truncated diff hunk
     assert "A" * 5000 not in result["edit_plans"][0].instructions
     assert "diff:" in result["edit_plans"][0].instructions
+
+
+@pytest.mark.asyncio
+async def test_writer_timeout_uses_deterministic_fallback():
+    """Verify writer applies deterministic fallback when LLM times out or errors."""
+    from src.orchestrator.nodes.writer import build_writer_node
+    from src.orchestrator.state import SectionEditPlan
+
+    class FailingLLM:
+        async def generate_text(self, system: str, user: str) -> str:
+            raise TimeoutError("LLM call timed out")
+
+    writer = build_writer_node(FailingLLM())
+    state = {
+        "drift_report": DriftReport(
+            change_report=ChangeReport(
+                delivery_id="deliv-fallback",
+                repo_full_name="org/repo",
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                changed_symbols=[
+                    ChangedSymbol(
+                        file_path="src/calc.py",
+                        symbol_name="compute_total",
+                        symbol_kind="function",
+                        change_class=ChangeClass.API_SURFACE,
+                        change_type="modified",
+                        new_signature="def compute_total(a: int, b: int) -> int",
+                        diff_hunk="def compute_total(a: int, b: int) -> int",
+                    )
+                ],
+            ),
+            impacted_sections=[
+                ImpactedDocSection(
+                    doc_path="README.md",
+                    heading="API Reference",
+                    start_line=1,
+                    end_line=5,
+                    matched_symbols=["compute_total"],
+                    match_method="exact_anchor",
+                    confidence=0.9,
+                    current_markdown="Old content",
+                )
+            ],
+        ),
+        "edit_plans": [
+            SectionEditPlan(
+                doc_path="README.md",
+                heading="API Reference",
+                target_symbols=["compute_total"],
+                instructions="Document compute_total",
+            )
+        ],
+        "full_docs": {"README.md": "# API Reference\nOld content\n"},
+    }
+
+    result = await writer(state)
+    assert len(result["drafts"]) == 1
+    draft = result["drafts"][0]
+    assert "compute_total" in draft.updated_markdown
+    assert "def compute_total(a: int, b: int) -> int" in draft.updated_markdown
+    assert "README.md" in result["updated_docs"]
+    assert "compute_total" in result["updated_docs"]["README.md"]

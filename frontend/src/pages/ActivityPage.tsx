@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Loader2, AlertCircle, RefreshCw, Radio } from "lucide-react";
-import { getActivity, pollRepos } from "../services/api";
+import { getActivity, pollRepos, cancelActivityRun } from "../services/api";
 import type { ActivityRun, RunStatus } from "../services/api";
 import type {
   ActivityRunItem,
@@ -9,6 +9,7 @@ import type {
   PipelineStageState,
 } from "../lib/api";
 import { RunInspectorDrawer } from "../components/activity/RunInspectorDrawer";
+import { CancelRunButton } from "../components/activity/CancelRunButton";
 
 function relativeTime(value?: string | null): string {
   if (!value) return "just now";
@@ -277,6 +278,22 @@ export const ActivityPage: React.FC = () => {
     void load();
   }, [load]);
 
+  const handleCancelRun = useCallback(
+    async (run: ActivityRunItem) => {
+      // Optimistically flip the row so it stops looking "running" immediately.
+      setRuns((prev) =>
+        prev.map((item) =>
+          item.id === run.id
+            ? { ...item, status: "failed" as RunStatus, status_label: "cancelled" }
+            : item
+        )
+      );
+      await cancelActivityRun(run.delivery_id || run.id, run.sha);
+      await load(true);
+    },
+    [load]
+  );
+
   // Detect new commits on listening repos even when webhooks are missed.
   useEffect(() => {
     let cancelled = false;
@@ -455,9 +472,19 @@ export const ActivityPage: React.FC = () => {
                 </div>
 
                 {/* Right Column: LLM Calls & Relative Time */}
-                <div className="text-left sm:text-right font-mono text-xs shrink-0">
-                  <p className="text-[#F5F2EB]">{run.llm_calls_text}</p>
-                  <p className="text-[#8E897F] mt-0.5">{run.relative_time}</p>
+                <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
+                  <div className="text-left sm:text-right font-mono text-xs">
+                    <p className="text-[#F5F2EB]">{run.llm_calls_text}</p>
+                    <p className="text-[#8E897F] mt-0.5">{run.relative_time}</p>
+                  </div>
+                  {run.status === "running" && (
+                    <CancelRunButton
+                      onCancel={(event) => {
+                        event.stopPropagation();
+                        void handleCancelRun(run);
+                      }}
+                    />
+                  )}
                 </div>
               </div>
             );

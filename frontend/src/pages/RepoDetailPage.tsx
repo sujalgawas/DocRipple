@@ -25,7 +25,9 @@ import {
   getRepoHistory,
   triggerRepo,
   executeDemoRun,
+  cancelActivityRun,
 } from "../services/api";
+import { CancelRunButton } from "../components/activity/CancelRunButton";
 import type {
   DocStyleSkill,
   RepoMemoryMap,
@@ -355,6 +357,28 @@ function getItemStatus(
     } finally {
       setSyncing(false);
     }
+  };
+
+  const handleCancelRun = async (item: RepoHistoryItem) => {
+    // Optimistically mark the row terminal so the UI stops showing "running".
+    setRepoHistory((prev) =>
+      prev
+        ? {
+            ...prev,
+            history: prev.history.map((entry) =>
+              entry.id === item.id
+                ? {
+                    ...entry,
+                    status: "failed" as RepoHistoryItem["status"],
+                    status_label: "cancelled",
+                  }
+                : entry
+            ),
+          }
+        : prev
+    );
+    await cancelActivityRun(item.id, item.full_sha || item.sha);
+    await loadData(true);
   };
 
   const handleRunSimulation = async () => {
@@ -802,9 +826,17 @@ function getItemStatus(
 
                           {/* Per-Commit Sync/Rerun Action Button */}
                           {isItemRunning ? (
-                            <span className="text-amber-400 font-mono text-xs flex items-center gap-1">
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                              syncing...
+                            <span className="flex items-center gap-2">
+                              <span className="text-amber-400 font-mono text-xs flex items-center gap-1">
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                syncing...
+                              </span>
+                              <CancelRunButton
+                                onCancel={(event) => {
+                                  event.stopPropagation();
+                                  void handleCancelRun(item);
+                                }}
+                              />
                             </span>
                           ) : (
                             <button

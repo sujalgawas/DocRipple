@@ -11,6 +11,7 @@ import logging
 import os
 from typing import Any, Protocol
 
+import httpx
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -41,11 +42,12 @@ class LLMClientProtocol(Protocol):
 class OpenAICompatibleLLMClient:
     """OpenAI-compatible async client with automatic fallback."""
 
-    PRIMARY_FALLBACK_MODELS = [
+    GOOGLE_FALLBACK_MODELS = [
         "gemma-3-27b-it",
         "gemma-3-12b-it",
         "gemma-3-4b-it",
         "gemini-2.5-flash-lite",
+        "gemini-2.0-flash",
     ]
 
     def __init__(
@@ -65,7 +67,7 @@ class OpenAICompatibleLLMClient:
         if gemini_fallback and (not resolved_api_key or resolved_api_key == "dev-key" or resolved_api_key.startswith("gsk_")):
             resolved_api_key = gemini_fallback
             if not resolved_base_url or "groq.com" in resolved_base_url:
-                resolved_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+                resolved_base_url = "https://generativelanguage.googleapis.com/v1beta"
                 resolved_model = "gemma-3-27b-it"
 
         self._base_url = resolved_base_url
@@ -101,7 +103,8 @@ class OpenAICompatibleLLMClient:
         self._fallback_model = fb_model
 
         self._fallback_client: AsyncOpenAI | None = None
-        if self._fallback_api_key and self._fallback_api_key not in ("dev-key", ""):
+        # When Google is configured, never use OpenRouter fallback (prevents 57s hanging on dead OpenRouter)
+        if not self._is_google_configured() and self._fallback_api_key and self._fallback_api_key not in ("dev-key", ""):
             # Avoid redundant fallback if primary is identical
             if not (
                 self._base_url == self._fallback_base_url
@@ -118,6 +121,83 @@ class OpenAICompatibleLLMClient:
                         "X-Title": "DocRipple",
                     },
                 )
+
+    def _is_google_configured(self) -> bool:
+        key = (self._api_key or "").strip()
+        url = (self._base_url or "").strip().lower()
+        if "groq.com" in url or "openrouter.ai" in url:
+            return False
+        if key.startswith("AIza") or "googleapis.com" in url:
+            return True
+        for env_key in ("LLM_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+            val = (os.getenv(env_key) or "").strip()
+            if val.startswith("AIza"):
+                return True
+        return False
+
+    def _get_google_api_key(self) -> str:
+        key = (self._api_key or "").strip()
+        if key.startswith("AIza"):
+            return key
+        for env_key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "LLM_API_KEY"):
+            val = (os.getenv(env_key) or "").strip()
+            if val.startswith("AIza"):
+                return val
+        return key
+
+    async def _generate_google(self, system_prompt: str, user_prompt: str) -> str:
+        """Call Google's native v1beta/models/{model}:generateContent REST endpoint with fallback chain."""
+        models_to_try: list[str] = []
+        if self._model and self._model in self.GOOGLE_FALLBACK_MODELS:
+            models_to_try.append(self._model)
+        for m in self.GOOGLE_FALLBACK_MODELS:
+            if m not in models_to_try:
+                models_to_try.append(m)
+
+        api_key = self._get_google_api_key()
+        combined_text = f"{system_prompt}\n\n---\n\n{user_prompt}" if system_prompt else user_prompt
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": combined_text}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 2048,
+            },
+        }
+
+        last_exc: Exception | None = None
+        async with httpx.AsyncClient(timeout=12.0) as http_client:
+            for candidate_model in models_to_try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{candidate_model}:generateContent?key={api_key}"
+                try:
+                    logger.info("Calling Google native generateContent for model %s", candidate_model)
+                    resp = await http_client.post(url, json=payload)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    candidates = data.get("candidates") or []
+                    if not candidates:
+                        raise RuntimeError(f"Google API returned no candidates: {data}")
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if not parts:
+                        raise RuntimeError(f"Google API candidate had no parts: {candidates[0]}")
+                    text = parts[0].get("text", "")
+                    return text
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "Google native generateContent failed for model %s: %s; falling back to next model",
+                        candidate_model,
+                        exc,
+                    )
+                    continue
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("No Google model candidate succeeded")
 
     @staticmethod
     def _is_gemma_or_google(model: str, base_url: str) -> bool:
@@ -189,7 +269,7 @@ class OpenAICompatibleLLMClient:
     ) -> Any:
         primary_models = [self._model]
         if self._is_gemma_or_google(self._model, self._base_url):
-            for m in self.PRIMARY_FALLBACK_MODELS:
+            for m in self.GOOGLE_FALLBACK_MODELS:
                 if m not in primary_models:
                     primary_models.append(m)
 
@@ -277,16 +357,18 @@ class OpenAICompatibleLLMClient:
             f"Do not wrap in markdown fences.\n\n{schema_json}"
         )
 
-        messages = [
-            {"role": "system", "content": full_system},
-            {"role": "user", "content": user_prompt},
-        ]
-
-        response = await self._call_completion(
-            messages=messages,
-            temperature=0.0,
-        )
-        content = response.choices[0].message.content or "{}"
+        if self._is_google_configured():
+            content = await self._generate_google(full_system, user_prompt)
+        else:
+            messages = [
+                {"role": "system", "content": full_system},
+                {"role": "user", "content": user_prompt},
+            ]
+            response = await self._call_completion(
+                messages=messages,
+                temperature=0.0,
+            )
+            content = response.choices[0].message.content or "{}"
 
         # Strip markdown fences if present
         content = content.strip()
@@ -315,6 +397,9 @@ class OpenAICompatibleLLMClient:
         user_prompt: str,
     ) -> str:
         """Send a prompt and return free-form text."""
+        if self._is_google_configured():
+            return await self._generate_google(system_prompt, user_prompt)
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},

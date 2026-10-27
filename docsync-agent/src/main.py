@@ -233,6 +233,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     store: SqliteContextStore | None = None
     worker: BackgroundQueueWorker | None = None
 
+    # Cancellation registries. Initialised before the try block so the cancel
+    # endpoint always has them, even if startup partially fails.
+    active_run_tasks: dict[str, asyncio.Task] = {}
+    cancelled_deliveries: set[str] = set()
+    app.state.active_run_tasks = active_run_tasks
+    app.state.cancelled_deliveries = cancelled_deliveries
+
     try:
         # 1. Initialize ContextStore
         store = SqliteContextStore(settings.SQLITE_DB_PATH)
@@ -278,6 +285,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             context_store=store,
             fetcher=fetcher,
             github_service=github_service,
+            active_run_tasks=active_run_tasks,
+            cancelled_deliveries=cancelled_deliveries,
         )
 
         # Vercel Functions freeze background tasks once the response is returned,
@@ -304,19 +313,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.github_oauth_token = ""
 
         logger.info("DocSync application startup complete")
-    except Exception as exc:
-        logger.exception("DocSync startup failed; falling back to memory store: %s", exc)
+    except Exception:
+        logger.exception("DocSync startup failed; falling back to memory store")
         try:
             if store is not None:
                 try:
                     await store.close()
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 - best-effort cleanup
                     pass
             store = SqliteContextStore(":memory:")
             await store.initialize()
             try:
                 await seed_default_repository(store)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - seeding is optional
                 pass
             queue = asyncio.Queue()
             analyzer = ChangeAnalyzerService()
@@ -371,12 +380,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if worker is not None:
             try:
                 await worker.stop()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - shutdown is best-effort
                 pass
         if store is not None:
             try:
                 await store.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - shutdown is best-effort
                 pass
         logger.info("DocSync shutdown complete")
 

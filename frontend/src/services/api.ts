@@ -420,6 +420,26 @@ export function clearLocalSync(): void {
   } catch {}
 }
 
+const STALE_RUN_TIMEOUT_MS = 75 * 1000;
+
+export function sanitizeRunStatus(run: ActivityRun): ActivityRun {
+  if (run && run.status === "running") {
+    const ts = runTimestamp(run);
+    if (ts > 0 && Date.now() - ts > STALE_RUN_TIMEOUT_MS) {
+      return {
+        ...run,
+        status: "failed",
+        evidence_table_md: run.evidence_table_md || "Timed out (60s limit)",
+      };
+    }
+  }
+  return run;
+}
+
+export function cleanupStaleActivityRuns(): ActivityRun[] {
+  return getLocalActivityRuns();
+}
+
 function runTimestamp(run: ActivityRun): number {
   const value = new Date(run.created_at ?? "").getTime();
   return Number.isNaN(value) ? 0 : value;
@@ -432,11 +452,21 @@ export function mergeActivityRuns(
 ): ActivityRun[] {
   const byId = new Map<string, ActivityRun>();
   // Cached first so fresher backend rows overwrite them.
-  for (const run of cachedRuns) {
-    if (run?.delivery_id) byId.set(run.delivery_id, run);
+  for (const rawRun of cachedRuns) {
+    if (!rawRun?.delivery_id) continue;
+    const run = sanitizeRunStatus(rawRun);
+    byId.set(run.delivery_id, run);
   }
-  for (const run of backendRuns) {
-    if (run?.delivery_id) byId.set(run.delivery_id, run);
+  for (const rawRun of backendRuns) {
+    if (!rawRun?.delivery_id) continue;
+    const run = sanitizeRunStatus(rawRun);
+    const cached = byId.get(run.delivery_id);
+    // A run we cancelled locally must never re-hydrate as "running" from a
+    // stale backend snapshot.
+    if (cached && cached.status !== "running" && run.status === "running") {
+      continue;
+    }
+    byId.set(run.delivery_id, run);
   }
   return [...byId.values()].sort((a, b) => runTimestamp(b) - runTimestamp(a));
 }
@@ -448,7 +478,23 @@ function mergeAndPersistRuns(backendRuns: ActivityRun[]): ActivityRun[] {
 }
 
 export function getLocalActivityRuns(): ActivityRun[] {
-  return readJsonArray<ActivityRun>(ACTIVITY_RUNS_KEY);
+  const rawRuns = readJsonArray<ActivityRun>(ACTIVITY_RUNS_KEY);
+  let changed = false;
+  const sanitized = rawRuns.map((r) => {
+    const clean = sanitizeRunStatus(r);
+    if (clean.status !== r.status) changed = true;
+    return clean;
+  });
+  if (changed) {
+    writeJsonArray(ACTIVITY_RUNS_KEY, sanitized);
+  }
+  return sanitized;
+}
+
+if (typeof window !== "undefined") {
+  try {
+    cleanupStaleActivityRuns();
+  } catch {}
 }
 
 function cacheReposFromBackend(repositories: MonitoredRepo[]): void {
@@ -471,6 +517,12 @@ function cacheReposFromBackend(repositories: MonitoredRepo[]): void {
   }
   saveLocalConnectedRepos([...byName.values()]);
 }
+
+/**
+ * In-flight trigger/poll requests, so cancelling a run stops the browser from
+ * waiting on a pipeline that is no longer wanted.
+ */
+const activeTriggerControllers = new Map<string, AbortController>();
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getStoredToken();
@@ -601,26 +653,96 @@ export async function pollRepos(
     (repo) => repo.status !== "paused"
   );
 
-  const result = await request<PollResult>("/api/v1/repos/poll", {
-    method: "POST",
-    body: JSON.stringify({
-      repos: candidates.map((repo) => ({
-        repo_full_name: repo.repo_full_name,
-        watch_branch: repo.watch_branch,
-        last_processed_sha: repo.last_processed_sha ?? null,
-        status: repo.status,
-      })),
-    }),
+  const key = "poll";
+  const controller = new AbortController();
+  activeTriggerControllers.set(key, controller);
+
+  try {
+    const result = await request<PollResult>("/api/v1/repos/poll", {
+      method: "POST",
+      signal: controller.signal,
+      body: JSON.stringify({
+        repos: candidates.map((repo) => ({
+          repo_full_name: repo.repo_full_name,
+          watch_branch: repo.watch_branch,
+          last_processed_sha: repo.last_processed_sha ?? null,
+          status: repo.status,
+        })),
+      }),
+    });
+
+    for (const [repoFullName, sha] of Object.entries(result.watermarks ?? {})) {
+      if (sha) setLocalLastProcessedSha(repoFullName, sha);
+    }
+    if (result.new_runs.length > 0) {
+      mergeAndPersistRuns(result.new_runs);
+    }
+
+    return result;
+  } finally {
+    if (activeTriggerControllers.get(key) === controller) {
+      activeTriggerControllers.delete(key);
+    }
+  }
+}
+
+/**
+ * Cancel a running (or stuck) run.
+ *
+ * Aborts any in-flight trigger/poll request, marks the cached run terminal so it
+ * never re-hydrates as "running", then asks the backend to stop it. Network
+ * errors are ignored because the serverless function may already have exited.
+ */
+export async function cancelActivityRun(
+  deliveryId: string,
+  commitSha?: string
+): Promise<void> {
+  for (const controller of activeTriggerControllers.values()) {
+    try {
+      controller.abort();
+    } catch {
+      // Already aborted.
+    }
+  }
+  activeTriggerControllers.clear();
+
+  const rawId = (deliveryId || "").trim();
+  // Repo-history rows use synthetic ids like `run-<delivery_id>`.
+  const normalizedId = rawId.startsWith("run-") ? rawId.slice(4) : rawId;
+  const sha = (commitSha || "").trim();
+  const shortSha = sha.slice(0, 7);
+
+  const updatedCache = getLocalActivityRuns().map((run) => {
+    const matches =
+      (normalizedId.length > 0 &&
+        (run.delivery_id === normalizedId ||
+          run.delivery_id === rawId ||
+          run.delivery_id.endsWith(normalizedId))) ||
+      (sha.length > 0 && run.commit_sha === sha) ||
+      (shortSha.length >= 7 && (run.commit_sha || "").startsWith(shortSha));
+    if (!matches) return run;
+    return {
+      ...run,
+      status: "failed" as RunStatus,
+      llm_calls: 0,
+      evidence_table_md: "Cancelled by user",
+    };
   });
+  writeJsonArray(ACTIVITY_RUNS_KEY, updatedCache);
 
-  for (const [repoFullName, sha] of Object.entries(result.watermarks ?? {})) {
-    if (sha) setLocalLastProcessedSha(repoFullName, sha);
-  }
-  if (result.new_runs.length > 0) {
-    mergeAndPersistRuns(result.new_runs);
-  }
+  const apiId = rawId.startsWith("gh-commit-")
+    ? sha || rawId
+    : normalizedId || sha;
+  if (!apiId) return;
 
-  return result;
+  try {
+    await request<{ status: string; delivery_id: string }>(
+      `/api/v1/activity/${encodeURIComponent(apiId)}/cancel`,
+      { method: "POST" }
+    );
+  } catch {
+    // Best-effort: the UI already reflects the cancellation.
+  }
 }
 
 // ── Dashboard & activity ────────────────────────────────────────────────────
@@ -689,17 +811,26 @@ export function triggerRepo(
   commitSha?: string,
   options?: { force?: boolean; checkDuplicate?: boolean }
 ): Promise<TriggerResponse> {
+  const key = `${owner}/${repo}`;
+  const controller = new AbortController();
+  activeTriggerControllers.set(key, controller);
+
   return request<TriggerResponse>(
     `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/trigger`,
     {
       method: "POST",
+      signal: controller.signal,
       body: JSON.stringify({
         ...(commitSha ? { commit_sha: commitSha } : {}),
         ...(options?.force ? { force: true } : {}),
         ...(options?.checkDuplicate ? { check_duplicate: true } : {}),
       }),
     }
-  );
+  ).finally(() => {
+    if (activeTriggerControllers.get(key) === controller) {
+      activeTriggerControllers.delete(key);
+    }
+  });
 }
 
 // ── Settings ────────────────────────────────────────────────────────────────

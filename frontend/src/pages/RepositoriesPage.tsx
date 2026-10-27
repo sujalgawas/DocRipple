@@ -8,12 +8,19 @@ import {
   Loader2,
   AlertCircle,
 } from "lucide-react";
-import { getAuthMe, getDashboard, pollRepos, triggerRepo } from "../services/api";
+import {
+  getAuthMe,
+  getDashboard,
+  pollRepos,
+  triggerRepo,
+  cancelActivityRun,
+} from "../services/api";
 import type {
   ActivityRun,
   AuthMe,
   DashboardResponse,
 } from "../services/api";
+import { CancelRunButton } from "../components/activity/CancelRunButton";
 
 const statusStyles: Record<
   ActivityRun["status"],
@@ -167,6 +174,24 @@ export const RepositoriesPage: React.FC = () => {
     } finally {
       setSyncingRepo(null);
     }
+  };
+
+  const handleCancelRun = async (run: ActivityRun) => {
+    // Flip the row immediately so it no longer reads as "running".
+    setDashboard((prev) =>
+      prev
+        ? {
+            ...prev,
+            latest_runs: prev.latest_runs.map((item) =>
+              item.delivery_id === run.delivery_id
+                ? { ...item, status: "failed" as ActivityRun["status"], llm_calls: 0 }
+                : item
+            ),
+          }
+        : prev
+    );
+    await cancelActivityRun(run.delivery_id, run.commit_sha);
+    await load(true);
   };
 
   return (
@@ -415,14 +440,24 @@ export const RepositoriesPage: React.FC = () => {
                   </div>
 
                   {/* Right: LLM calls & Time */}
-                  <div className="text-right font-mono text-xs text-[#8E897F] shrink-0">
-                    <p className="text-[#F5F2EB]">
-                      {run.llm_calls} llm call
-                      {run.llm_calls === 1 ? "" : "s"}
-                    </p>
-                    <p className="text-[#8E897F] mt-0.5">
-                      {relativeTime(run.created_at)}
-                    </p>
+                  <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
+                    <div className="text-right font-mono text-xs text-[#8E897F]">
+                      <p className="text-[#F5F2EB]">
+                        {run.llm_calls} llm call
+                        {run.llm_calls === 1 ? "" : "s"}
+                      </p>
+                      <p className="text-[#8E897F] mt-0.5">
+                        {relativeTime(run.created_at)}
+                      </p>
+                    </div>
+                    {run.status === "running" && (
+                      <CancelRunButton
+                        onCancel={(event) => {
+                          event.stopPropagation();
+                          void handleCancelRun(run);
+                        }}
+                      />
+                    )}
                   </div>
                 </div>
               );

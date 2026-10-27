@@ -175,6 +175,8 @@ class DocSyncPipeline:
         context_store: ContextStoreProtocol,
         fetcher: GitHubRepoFetcher | None = None,
         github_service: GitHubService | None = None,
+        active_run_tasks: dict[str, asyncio.Task] | None = None,
+        cancelled_deliveries: set[str] | None = None,
     ) -> None:
         self.analyzer = analyzer
         self.drift_engine = drift_engine
@@ -182,6 +184,13 @@ class DocSyncPipeline:
         self.context_store = context_store
         self.fetcher = fetcher or GitHubRepoFetcher()
         self.github_service = github_service
+        # Shared with ``app.state`` so the cancel endpoint can reach them.
+        self.active_run_tasks: dict[str, asyncio.Task] = (
+            active_run_tasks if active_run_tasks is not None else {}
+        )
+        self.cancelled_deliveries: set[str] = (
+            cancelled_deliveries if cancelled_deliveries is not None else set()
+        )
 
     async def execute_job(
         self,
@@ -313,6 +322,12 @@ class DocSyncPipeline:
             )
 
             # Step 4 & 5 (Orchestrate & Persist)
+            # Cancel before spending any LLM tokens or opening a docs PR. The
+            # publisher runs inside orchestrator.run, so this is the last
+            # cheap checkpoint in the pipeline.
+            if await self._cancel_if_requested(job.delivery_id, "orchestrator"):
+                return None
+
             # PR events carry the head ref in ``ref``; docs PRs must target the
             # PR base branch. Push/manual jobs fall back to their own branch.
             branch = job.base_ref or _branch_from_ref(job.ref)
@@ -323,6 +338,15 @@ class DocSyncPipeline:
                     llm_calls = int(
                         getattr(self.orchestrator, "last_llm_calls", 0)
                     )
+
+            # A cancel may arrive while the orchestrator is running. If no PR
+            # was opened, treat the run as cancelled instead of a clean success.
+            if (
+                job.delivery_id in self.cancelled_deliveries
+                and not getattr(publish_result, "pr_url", None)
+            ):
+                await self._mark_cancelled(job.delivery_id)
+                return None
 
             logger.info(
                 "Orchestrator completed for %s with verification_status=%s "
@@ -348,12 +372,54 @@ class DocSyncPipeline:
             return None
 
     async def process_webhook(self, job: WebhookJob) -> PublishResult | None:
-        """Run a job inline from a webhook or the automatic commit poller.
+        """Run a job inline from a webhook, the poller, or a manual trigger.
 
         Vercel freezes the function once the response is sent, so callers must
-        await this instead of relying on the background queue worker.
+        await this instead of relying on the background queue worker. The
+        current task is registered so ``POST /activity/{id}/cancel`` can stop
+        it in-process.
         """
-        return await self.execute_job(job)
+        if job.delivery_id in self.cancelled_deliveries:
+            await self._mark_cancelled(job.delivery_id)
+            return None
+
+        task = asyncio.current_task()
+        if task is not None:
+            self.active_run_tasks[job.delivery_id] = task
+        try:
+            return await self.execute_job(job)
+        except asyncio.CancelledError:
+            logger.info("Run %s cancelled while executing", job.delivery_id)
+            await self._mark_cancelled(job.delivery_id)
+            raise
+        finally:
+            self.active_run_tasks.pop(job.delivery_id, None)
+
+    async def _cancel_if_requested(self, delivery_id: str, stage: str) -> bool:
+        """Return True (and persist the cancelled state) when a stop was asked for."""
+        if delivery_id not in self.cancelled_deliveries:
+            return False
+        logger.info("Run %s cancelled by user before %s", delivery_id, stage)
+        await self._mark_cancelled(delivery_id)
+        return True
+
+    async def _mark_cancelled(self, delivery_id: str) -> None:
+        """Mark a run as failed with a clear, user-visible cancellation message."""
+        logger.info("Marking delivery %s as cancelled", delivery_id)
+        await self._update_activity(
+            delivery_id,
+            status="failed",
+            llm_calls=0,
+            evidence_table_md="Cancelled by user",
+            diff_preview={
+                "file_path": "",
+                "deleted_lines": [],
+                "added_lines": [],
+                "context": "Cancelled by user",
+                "changed_symbols": [],
+                "impacted_sections": [],
+            },
+        )
 
     # ── Activity tracking helpers ─────────────────────────────────────
     async def _start_activity(self, job: WebhookJob) -> None:

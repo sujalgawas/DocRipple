@@ -747,6 +747,39 @@ class SqliteContextStore:
         rows = await cursor.fetchall()
         return [_activity_run_row(row) for row in rows]
 
+    async def expire_stale_activity_runs(self, max_age_seconds: float = 75.0) -> int:
+        """Mark running activities older than max_age_seconds as failed."""
+        now = datetime.now(UTC)
+        cursor = await self._db.execute(
+            "SELECT delivery_id, created_at FROM activity_runs WHERE status = 'running'"
+        )
+        rows = await cursor.fetchall()
+        stale_ids: list[str] = []
+        for row in rows:
+            created_at_str = row[1] if isinstance(row, (tuple, list)) else row["created_at"]
+            try:
+                dt = datetime.fromisoformat((created_at_str or "").replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                age = (now - dt).total_seconds()
+                if age > max_age_seconds:
+                    stale_ids.append(row[0] if isinstance(row, (tuple, list)) else row["delivery_id"])
+            except Exception:
+                stale_ids.append(row[0] if isinstance(row, (tuple, list)) else row["delivery_id"])
+
+        if stale_ids:
+            placeholders = ", ".join("?" for _ in stale_ids)
+            await self._db.execute(
+                f"""UPDATE activity_runs
+                   SET status = 'failed',
+                       evidence_table_md = 'Timed out (60s limit)'
+                   WHERE delivery_id IN ({placeholders})""",
+                stale_ids,
+            )
+            await self._db.commit()
+            logger.info("Expired %d stale running activity run(s)", len(stale_ids))
+        return len(stale_ids)
+
     async def get_activity_stats(self) -> dict[str, int]:
         """Aggregate dashboard counters from activity runs."""
         week_start = (datetime.now(UTC) - timedelta(days=7)).isoformat()

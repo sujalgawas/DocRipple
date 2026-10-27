@@ -7,6 +7,7 @@ user settings. All state is backed by SQLite and the real GitHub REST API.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import UTC, datetime
@@ -625,6 +626,16 @@ async def restore_repos(payload: RestoreReposRequest, request: Request) -> dict:
     return {"restored": restored, "repositories": repositories}
 
 
+async def _expire_stale_runs(store) -> None:
+    """Mark runs stuck in 'running' older than 75 seconds as failed."""
+    expirer = getattr(store, "expire_stale_activity_runs", None)
+    if callable(expirer):
+        try:
+            await expirer(max_age_seconds=75.0)
+        except Exception:
+            logger.debug("Could not expire stale activity runs", exc_info=True)
+
+
 @router.post("/repos/poll")
 async def poll_repos(payload: PollReposRequest, request: Request) -> dict:
     """Detect new commits for listening repositories and run the pipeline.
@@ -633,6 +644,7 @@ async def poll_repos(payload: PollReposRequest, request: Request) -> dict:
     the dashboard poll for new commits instead of relying on delivery.
     """
     store = _get_store(request)
+    await _expire_stale_runs(store)
     await _resolve_github_token(request)
     service = _get_github_service(request)
     pipeline = getattr(request.app.state, "pipeline", None)
@@ -703,7 +715,20 @@ async def poll_repos(payload: PollReposRequest, request: Request) -> dict:
             author=author,
         )
         try:
-            result = await pipeline.process_webhook(job)
+            result = await asyncio.wait_for(pipeline.process_webhook(job), timeout=48.0)
+        except TimeoutError:
+            logger.warning("Poll pipeline execution timed out at 48s for %s", job.delivery_id)
+            updater = getattr(store, "update_activity_run", None)
+            if callable(updater):
+                try:
+                    await updater(
+                        job.delivery_id,
+                        status="failed",
+                        evidence_table_md="Timed out (60s limit)",
+                    )
+                except Exception:
+                    logger.debug("Could not update activity run on timeout", exc_info=True)
+            continue
         except Exception:
             logger.exception("Poll pipeline failed for %s", repo_full_name)
             continue
@@ -726,6 +751,7 @@ async def poll_repos(payload: PollReposRequest, request: Request) -> dict:
 async def dashboard(request: Request) -> dict:
     """Aggregate counters, monitored repositories, and latest activity."""
     store = _get_store(request)
+    await _expire_stale_runs(store)
     await _resolve_github_token(request)
     service = _get_github_service(request)
 
@@ -764,6 +790,7 @@ async def activity(
     """Return every run, newest first. If no pipeline runs exist yet,
     pull recent commits from the GitHub API so activity reflects real work."""
     store = _get_store(request)
+    await _expire_stale_runs(store)
     await _resolve_github_token(request)
     service = _get_github_service(request)
 
@@ -820,6 +847,77 @@ async def activity(
     return {"runs": synthesized_runs}
 
 
+@router.post("/activity/{delivery_id}/cancel")
+async def cancel_activity_run(delivery_id: str, request: Request) -> dict:
+    """Stop a running (or stuck) pipeline run.
+
+    The flag is checked by the pipeline before the orchestrator/LLM step and
+    before opening the PR. In the same process the task is cancelled outright.
+    """
+    store = _get_store(request)
+
+    cancelled: set[str] = getattr(request.app.state, "cancelled_deliveries", None)
+    if cancelled is None:
+        cancelled = set()
+        request.app.state.cancelled_deliveries = cancelled
+    cancelled.add(delivery_id)
+
+    tasks: dict[str, object] = getattr(request.app.state, "active_run_tasks", None) or {}
+    task = tasks.get(delivery_id)
+    if task is not None and not getattr(task, "done", lambda: True)():
+        cancel = getattr(task, "cancel", None)
+        if callable(cancel):
+            cancel()
+
+    # Resolve the run. The caller may pass a delivery id or a commit SHA.
+    run = await store.get_activity_run(delivery_id)
+    if run is None:
+        runs = await store.list_activity_runs()
+        run = next(
+            (
+                candidate
+                for candidate in runs
+                if _is_same_commit(candidate.get("commit_sha"), delivery_id)
+            ),
+            None,
+        )
+
+    resolved_id = (run or {}).get("delivery_id") or delivery_id
+    if resolved_id != delivery_id:
+        # The pipeline checks by its own delivery_id, not the SHA we were given.
+        cancelled.add(resolved_id)
+
+    await _set_run_cancelled(store, resolved_id)
+    if run is not None and run.get("delivery_id") != delivery_id:
+        await _set_run_cancelled(store, delivery_id)
+
+    return {"status": "cancelled", "delivery_id": delivery_id}
+
+
+async def _set_run_cancelled(store, delivery_id: str) -> None:
+    """Persist the terminal cancelled state for one activity run."""
+    updater = getattr(store, "update_activity_run", None)
+    if not callable(updater):
+        return
+    try:
+        await updater(
+            delivery_id,
+            status="failed",
+            llm_calls=0,
+            evidence_table_md="Cancelled by user",
+            diff_preview={
+                "file_path": "",
+                "deleted_lines": [],
+                "added_lines": [],
+                "context": "Cancelled by user",
+                "changed_symbols": [],
+                "impacted_sections": [],
+            },
+        )
+    except Exception:
+        logger.warning("Could not mark %s cancelled", delivery_id, exc_info=True)
+
+
 @router.get("/repos/{owner}/{repo}/history")
 async def repo_history(
     owner: str,
@@ -829,6 +927,7 @@ async def repo_history(
     """Return real execution history combining GitHub commits, PRs, and DocRipple pipeline runs."""
     repo_full_name = f"{owner}/{repo}"
     store = _get_store(request)
+    await _expire_stale_runs(store)
     await _resolve_github_token(request)
     service = _get_github_service(request)
 
@@ -1007,6 +1106,7 @@ async def trigger_repo(
     or was already synced with no drift.
     """
     store = _get_store(request)
+    await _expire_stale_runs(store)
     repo_full_name = f"{owner}/{repo}"
     monitored = await store.get_monitored_repo(repo_full_name)
     if monitored is None:
@@ -1094,8 +1194,21 @@ async def trigger_repo(
 
     if inline_execution and pipeline is not None:
         # Vercel freezes background work after the response, so execute the
-        # pipeline inside this request (bounded by the 60s function timeout).
-        await pipeline.execute_job(job)
+        # pipeline inside this request (bounded by 48s timeout before 60s hard kill).
+        try:
+            await asyncio.wait_for(pipeline.process_webhook(job), timeout=48.0)
+        except TimeoutError:
+            logger.warning("Pipeline execution timed out at 48s for %s", delivery_id)
+            updater = getattr(store, "update_activity_run", None)
+            if callable(updater):
+                try:
+                    await updater(
+                        delivery_id,
+                        status="failed",
+                        evidence_table_md="Timed out (60s limit)",
+                    )
+                except Exception:
+                    logger.debug("Could not update activity run on timeout", exc_info=True)
     else:
         queue = getattr(request.app.state, "webhook_queue", None)
         if queue is None:
