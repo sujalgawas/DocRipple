@@ -9,12 +9,10 @@ from pydantic import BaseModel
 from src.contracts.schemas import (
     CodeDocEdge,
     DocStyleSkill,
-    DriftReport,
     MemoryNode,
     PublishResult,
     RepoMemoryMap,
 )
-from src.contracts.protocols import OrchestratorProtocol
 
 # ── Evidence & Publish ────────────────────────────────────────────────────
 
