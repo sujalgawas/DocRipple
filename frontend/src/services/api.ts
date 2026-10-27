@@ -285,13 +285,54 @@ export interface DisconnectResponse {
   removed_webhooks: number;
 }
 
-// ── Request helper ──────────────────────────────────────────────────────────
+// ── Token persistence & Request helper ──────────────────────────────────────
+
+const TOKEN_KEY = "docripple_github_token";
+
+export function getStoredToken(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const urlToken = params.get("token");
+    if (urlToken) {
+      localStorage.setItem(TOKEN_KEY, urlToken);
+      params.delete("token");
+      const cleanUrl =
+        window.location.pathname +
+        (params.toString() ? `?${params.toString()}` : "") +
+        window.location.hash;
+      window.history.replaceState({}, document.title, cleanUrl);
+      return urlToken;
+    }
+    return localStorage.getItem(TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function setStoredToken(token: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (token) {
+      localStorage.setItem(TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(TOKEN_KEY);
+    }
+  } catch {}
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getStoredToken();
+  const authHeaders: Record<string, string> = {};
+  if (token) {
+    authHeaders["Authorization"] = `Bearer ${token}`;
+  }
+
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...authHeaders,
       ...(init?.headers ?? {}),
     },
   });
@@ -334,11 +375,13 @@ export function githubLoginUrl(): string {
   return `${API_BASE}/api/v1/auth/github/login${frontendUrl}`;
 }
 
-export function loginWithToken(token: string): Promise<AuthMe> {
-  return request<AuthMe>("/api/v1/auth/token", {
+export async function loginWithToken(token: string): Promise<AuthMe> {
+  const res = await request<AuthMe>("/api/v1/auth/token", {
     method: "POST",
     body: JSON.stringify({ token }),
   });
+  setStoredToken(token);
+  return res;
 }
 
 export function saveOAuthConfig(
@@ -430,7 +473,8 @@ export function updateSettings(
   });
 }
 
-export function disconnectGitHub(): Promise<DisconnectResponse> {
+export async function disconnectGitHub(): Promise<DisconnectResponse> {
+  setStoredToken("");
   return request<DisconnectResponse>("/api/v1/settings/disconnect", {
     method: "POST",
   });

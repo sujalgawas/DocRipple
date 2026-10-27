@@ -48,6 +48,54 @@ def _get_store(request: Request):
     return store
 
 
+def _extract_header_token(request: Request) -> str:
+    """Extract bearer token from Authorization header or token query param."""
+    auth_header = request.headers.get("authorization", "").strip()
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+        if token and token != "gho_fake_token":
+            return token
+    query_token = request.query_params.get("token", "").strip()
+    if query_token and query_token != "gho_fake_token":
+        return query_token
+    return ""
+
+
+async def _resolve_github_token(request: Request) -> str:
+    """Find valid token from header, state, persistent database, or settings."""
+    # 1. Direct header or query parameter from frontend
+    header_token = _extract_header_token(request)
+    if header_token:
+        _propagate_github_token(request, header_token)
+        return header_token
+
+    # 2. In-memory state
+    oauth_token = getattr(request.app.state, "github_oauth_token", "")
+    if oauth_token and oauth_token != "gho_fake_token":
+        _propagate_github_token(request, oauth_token)
+        return oauth_token
+
+    # 3. SQLite persistent store
+    store = getattr(request.app.state, "context_store", None)
+    if store is not None:
+        try:
+            settings_row = await store.get_user_settings()
+            db_token = (settings_row.get("github_token") or "").strip()
+            if db_token and db_token != "gho_fake_token":
+                _propagate_github_token(request, db_token)
+                return db_token
+        except Exception:
+            pass
+
+    # 4. Settings fallback from environment
+    env_token = (settings.GITHUB_TOKEN or "").strip()
+    if env_token and env_token != "gho_fake_token":
+        _propagate_github_token(request, env_token)
+        return env_token
+
+    return ""
+
+
 def _get_github_service(request: Request) -> GitHubService:
     service: GitHubService | None = getattr(
         request.app.state, "github_service", None
@@ -56,8 +104,12 @@ def _get_github_service(request: Request) -> GitHubService:
         service = GitHubService(token=settings.GITHUB_TOKEN)
         request.app.state.github_service = service
 
+    header_token = _extract_header_token(request)
     oauth_token = getattr(request.app.state, "github_oauth_token", "")
-    service.token = oauth_token or service.token or settings.GITHUB_TOKEN
+    token = header_token or oauth_token or service.token or settings.GITHUB_TOKEN
+    if token == "gho_fake_token":
+        token = ""
+    service.token = token
 
     # Keep the pipeline's fetcher on the same token (single-user local app).
     pipeline = getattr(request.app.state, "pipeline", None)
@@ -70,18 +122,23 @@ def _get_github_service(request: Request) -> GitHubService:
 
 def _propagate_github_token(request: Request, token: str) -> None:
     """Keep every long-lived GitHub client on the current runtime token."""
+    clean = token if token != "gho_fake_token" else ""
     service = _get_github_service(request)
-    service.token = token
-    request.app.state.github_oauth_token = token
+    service.token = clean
+    request.app.state.github_oauth_token = clean
 
     pipeline = getattr(request.app.state, "pipeline", None)
     fetcher = getattr(pipeline, "fetcher", None) if pipeline is not None else None
     if fetcher is not None and hasattr(fetcher, "token"):
-        fetcher.token = token
+        fetcher.token = clean
 
 
-def _require_github_token(service: GitHubService) -> None:
-    if not service.token:
+async def _require_github_token(service: GitHubService, request: Request | None = None) -> None:
+    if request is not None and (not service.token or service.token == "gho_fake_token"):
+        resolved = await _resolve_github_token(request)
+        if resolved:
+            _propagate_github_token(request, resolved)
+    if not service.token or service.token == "gho_fake_token":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=(
@@ -169,6 +226,7 @@ def _github_failure(exc: Exception) -> HTTPException:
 @router.get("/auth/me")
 async def auth_me(request: Request) -> dict:
     """Return the current GitHub identity, or a disconnected state."""
+    await _resolve_github_token(request)
     service = _get_github_service(request)
     empty = {
         "connected": False,
@@ -177,7 +235,7 @@ async def auth_me(request: Request) -> dict:
         "plan": "free",
         "authorized_repos_count": 0,
     }
-    if not service.token:
+    if not service.token or service.token == "gho_fake_token":
         return empty
 
     try:
@@ -273,7 +331,8 @@ async def auth_with_token(payload: TokenAuthRequest, request: Request) -> dict:
     settings.GITHUB_TOKEN = token
 
     await _get_store(request).update_user_settings(
-        github_username=user["login"]
+        github_username=user["login"],
+        github_token=token,
     )
     _update_env_file({"GITHUB_TOKEN": token})
 
@@ -283,6 +342,7 @@ async def auth_with_token(payload: TokenAuthRequest, request: Request) -> dict:
         "avatar_url": user["avatar_url"],
         "plan": "free",
         "authorized_repos_count": user["repo_count"],
+        "token": token,
     }
 
 
@@ -375,7 +435,8 @@ async def github_callback(
         settings.GITHUB_TOKEN = token
         user = await service.get_authenticated_user()
         await _get_store(request).update_user_settings(
-            github_username=user["login"]
+            github_username=user["login"],
+            github_token=token,
         )
         _update_env_file({"GITHUB_TOKEN": token})
     except Exception as exc:
@@ -383,7 +444,7 @@ async def github_callback(
         raise _github_failure(exc) from exc
 
     return RedirectResponse(
-        url=f"{frontend_url}/repositories", status_code=307
+        url=f"{frontend_url}/repositories?token={token}", status_code=307
     )
 
 
@@ -394,7 +455,7 @@ async def github_callback(
 async def github_repos(request: Request) -> list[dict]:
     """Step 1 of the Add Repository wizard."""
     service = _get_github_service(request)
-    _require_github_token(service)
+    await _require_github_token(service, request)
     try:
         return await service.list_user_repos()
     except Exception as exc:
@@ -405,7 +466,7 @@ async def github_repos(request: Request) -> list[dict]:
 async def connect_repo(payload: ConnectRepoRequest, request: Request) -> dict:
     """Fetch a snapshot, run Stage 0, install the webhook, and persist."""
     service = _get_github_service(request)
-    _require_github_token(service)
+    await _require_github_token(service, request)
     store = _get_store(request)
     onboarding = getattr(request.app.state, "onboarding_service", None)
     if onboarding is None:
@@ -509,14 +570,15 @@ async def dashboard(request: Request) -> dict:
             repository["repo_full_name"], 0
         )
 
+    all_runs = await store.list_activity_runs(limit=10)
+    real_runs = [r for r in all_runs if not r.get("delivery_id", "").startswith("seed-")]
+    latest = real_runs[:5] if real_runs else all_runs[:5]
+
     return {
         "stats": await store.get_activity_stats(),
         "repositories": repositories,
-        "latest_runs": await store.list_activity_runs(limit=5),
+        "latest_runs": latest,
     }
-
-
-# ── Activity & trigger ──────────────────────────────────────────────────
 
 
 @router.get("/activity")
@@ -525,10 +587,11 @@ async def activity(
     repo_full_name: str | None = Query(default=None),
 ) -> dict:
     """Return every run, newest first."""
-    runs = await _get_store(request).list_activity_runs(
+    all_runs = await _get_store(request).list_activity_runs(
         repo_full_name=repo_full_name
     )
-    return {"runs": runs}
+    real_runs = [r for r in all_runs if not r.get("delivery_id", "").startswith("seed-")]
+    return {"runs": real_runs if real_runs else all_runs}
 
 
 @router.get("/repos/{owner}/{repo}/history")
@@ -540,6 +603,7 @@ async def repo_history(
     """Return real execution history combining GitHub commits, PRs, and DocRipple pipeline runs."""
     repo_full_name = f"{owner}/{repo}"
     store = _get_store(request)
+    await _resolve_github_token(request)
     service = _get_github_service(request)
 
     monitored = await store.get_monitored_repo(repo_full_name)
@@ -630,6 +694,9 @@ async def repo_history(
         short_sha = run_sha[:7] if run_sha else ""
         if short_sha and short_sha in seen_shas:
             continue
+        # Skip cold-boot demo seed runs when live repo commits exist
+        if run.get("delivery_id", "").startswith("seed-") and commits:
+            continue
         status = run.get("status", "no_drift")
         status_label = "no drift" if status == "no_drift" else status.replace("_", " ")
         merged_history.append(
@@ -719,7 +786,7 @@ async def trigger_repo(
         )
 
     service = _get_github_service(request)
-    _require_github_token(service)
+    await _require_github_token(service, request)
 
     branch = monitored.get("watch_branch") or "main"
     try:

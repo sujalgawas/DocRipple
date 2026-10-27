@@ -84,6 +84,13 @@ class SqliteContextStore:
             )
             await self._conn.executescript(fallback_sql)
 
+        try:
+            await self._conn.execute(
+                "ALTER TABLE user_settings ADD COLUMN github_token TEXT"
+            )
+        except Exception:
+            pass
+
         await self._conn.commit()
         logger.info("SqliteContextStore initialised at %s", self._db_path)
 
@@ -758,6 +765,7 @@ class SqliteContextStore:
         self,
         *,
         github_username: str | None = None,
+        github_token: str | None = None,
         require_reviewer_approval: int | None = None,
         skip_internal_changes: int | None = None,
         email_on_failed_runs: int | None = None,
@@ -768,6 +776,7 @@ class SqliteContextStore:
         params: list[object] = []
         values = {
             "github_username": github_username,
+            "github_token": github_token,
             "require_reviewer_approval": require_reviewer_approval,
             "skip_internal_changes": skip_internal_changes,
             "email_on_failed_runs": email_on_failed_runs,
@@ -787,10 +796,10 @@ class SqliteContextStore:
         return await self.get_user_settings()
 
     async def clear_github_username(self) -> None:
-        """Clear the stored GitHub username (used by the disconnect action)."""
+        """Clear the stored GitHub username and token (used by the disconnect action)."""
         await self.get_user_settings()
         await self._db.execute(
-            "UPDATE user_settings SET github_username = NULL WHERE id = 1"
+            "UPDATE user_settings SET github_username = NULL, github_token = NULL WHERE id = 1"
         )
         await self._db.commit()
 

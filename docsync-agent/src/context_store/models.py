@@ -123,6 +123,7 @@ _DDL_USER_SETTINGS = """
 CREATE TABLE IF NOT EXISTS user_settings (
     id                        INTEGER PRIMARY KEY CHECK (id = 1),
     github_username           TEXT,
+    github_token              TEXT,
     require_reviewer_approval INTEGER DEFAULT 1,
     skip_internal_changes     INTEGER DEFAULT 1,
     email_on_failed_runs      INTEGER DEFAULT 0

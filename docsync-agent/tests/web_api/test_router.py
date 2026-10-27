@@ -303,7 +303,8 @@ async def test_auth_github_callback_redirects_to_repositories(app, monkeypatch):
             "/api/v1/auth/github/callback?code=some_code&state=valid-state"
         )
     assert response.status_code == 307
-    assert response.headers["location"] == "https://docripple.vercel.app/repositories"
+    assert response.headers["location"].startswith("https://docripple.vercel.app/repositories")
+    assert "token=gho_fake_token" in response.headers["location"]
 
 
 @pytest.mark.asyncio
