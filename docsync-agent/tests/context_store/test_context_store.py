@@ -7,6 +7,7 @@ empty-query safety, run-result round-trip, and embedding cache invalidation.
 from __future__ import annotations
 
 import asyncio
+from uuid import uuid4
 
 import pytest
 
@@ -209,3 +210,78 @@ async def test_embedding_cache_hit_and_invalidation(store: SqliteContextStore):
         "acme/repo", "docs/api.md", "other_section", "hash-abc"
     )
     assert missing is None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 6. Read-only path / Vercel path fallback
+# ════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_readonly_var_task_path_falls_back_to_writable():
+    """A read-only path like /var/task/docsync_context.db must initialize cleanly."""
+    store = SqliteContextStore("/var/task/docsync_context.db")
+    await store.initialize()
+    try:
+        normalized_path = store._db_path.replace("\\", "/")
+        assert (
+            normalized_path.endswith("/tmp/docsync_context.db")
+            or store._db_path == ":memory:"
+        )
+
+        recorded = await store.check_and_record_delivery(
+            f"deliv-{uuid4().hex}", "test/repo"
+        )
+        assert recorded is True
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_vercel_env_forces_tmp_resolution(monkeypatch: pytest.MonkeyPatch):
+    """When VERCEL is set, relative paths are forced into /tmp."""
+    monkeypatch.setenv("VERCEL", "1")
+    store = SqliteContextStore("docsync_context.db")
+    await store.initialize()
+    try:
+        normalized_path = store._db_path.replace("\\", "/")
+        assert (
+            normalized_path.endswith("/tmp/docsync_context.db")
+            or store._db_path == ":memory:"
+        )
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_checkpointer_readonly_path_fallback():
+    """_checkpointer falls back to InMemorySaver when given an unwritable path."""
+    from src.orchestrator.graph import _checkpointer
+
+    async with _checkpointer("/var/task/checkpoints.db") as saver:
+        assert saver is not None
+
+
+def test_settings_db_path_validator(monkeypatch: pytest.MonkeyPatch):
+    """AppSettings validator rewrites relative and unwritable paths to /tmp."""
+    from src.config import AppSettings, Settings
+
+    assert Settings is AppSettings
+
+    # Relative path is rewritten to /tmp/...
+    s = AppSettings(SQLITE_DB_PATH="custom.db")
+    assert s.SQLITE_DB_PATH == "/tmp/custom.db"
+
+    # Memory path is preserved
+    s_mem = AppSettings(SQLITE_DB_PATH=":memory:", CHECKPOINT_DB_PATH=":memory:")
+    assert s_mem.SQLITE_DB_PATH == ":memory:"
+    assert s_mem.CHECKPOINT_DB_PATH == ":memory:"
+
+    # Vercel env rewrites any path outside /tmp
+    monkeypatch.setenv("VERCEL", "1")
+    s_vercel = AppSettings(
+        SQLITE_DB_PATH="/var/task/docsync_context.db",
+        CHECKPOINT_DB_PATH="/var/task/checkpoints.db",
+    )
+    assert s_vercel.SQLITE_DB_PATH == "/tmp/docsync_context.db"
+    assert s_vercel.CHECKPOINT_DB_PATH == "/tmp/checkpoints.db"

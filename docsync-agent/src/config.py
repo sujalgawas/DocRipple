@@ -1,7 +1,9 @@
 """Application settings loaded from environment variables."""
 
 import os
+from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,5 +67,36 @@ class AppSettings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     MAX_RETRIES: int = 2
 
+    @field_validator("SQLITE_DB_PATH", "CHECKPOINT_DB_PATH", mode="after")
+    @classmethod
+    def _normalize_db_paths(cls, v: str) -> str:
+        if not v or v == ":memory:":
+            return v
+        p = Path(v)
+        posix = p.as_posix().lower()
+        is_in_tmp = (
+            posix.startswith("/tmp")
+            or posix.startswith("tmp/")
+            or "/tmp/" in posix
+            or posix == "/tmp"
+        )
+        is_relative = not p.is_absolute() and not (p.anchor in ("/", "\\"))
+        try:
+            cwd_read_only = not os.access(str(Path.cwd()), os.W_OK)
+        except OSError:
+            cwd_read_only = True
+        try:
+            parent_read_only = p.is_absolute() and not os.access(str(p.parent), os.W_OK)
+        except OSError:
+            parent_read_only = False
 
+        if is_relative or (
+            (bool(os.getenv("VERCEL")) or cwd_read_only or parent_read_only)
+            and not is_in_tmp
+        ):
+            return f"/tmp/{p.name}"
+        return v
+
+
+Settings = AppSettings
 settings = AppSettings()

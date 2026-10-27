@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -11,6 +12,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, StateGraph
 
+from src.context_store.sqlite_store import _resolve_writable_db_path
 from src.orchestrator.state import OrchestratorState
 
 if TYPE_CHECKING:
@@ -79,9 +81,24 @@ async def _checkpointer(db_path: str) -> AsyncIterator:
     ``:memory:`` → ``InMemorySaver`` (no connection lifecycle to manage).
     Otherwise → ``AsyncSqliteSaver`` held open by ``async with``.
     """
-    if db_path == ":memory:":
+    resolved = _resolve_writable_db_path(db_path) if db_path else ":memory:"
+    if not resolved or resolved == ":memory:":
         yield InMemorySaver()
         return
 
-    async with AsyncSqliteSaver.from_conn_string(db_path) as saver:
+    cm = AsyncSqliteSaver.from_conn_string(resolved)
+    try:
+        saver = await cm.__aenter__()
+    except sqlite3.OperationalError:
+        logger.warning(
+            "Could not open checkpoint DB at %s; falling back to InMemorySaver",
+            resolved,
+            exc_info=True,
+        )
+        yield InMemorySaver()
+        return
+
+    try:
         yield saver
+    finally:
+        await cm.__aexit__(None, None, None)

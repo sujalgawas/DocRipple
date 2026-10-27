@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiosqlite
@@ -28,22 +31,58 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_writable_db_path(db_path: str) -> str:
+    if not db_path or db_path == ":memory:" or db_path.startswith("file:"):
+        return ":memory:"
+    p = Path(db_path)
+    parent = p.parent if p.is_absolute() else Path.cwd() / p.parent
+    # If running on Vercel (/var/task) or parent directory is not writable, force into /tmp
+    if os.getenv("VERCEL") or not p.is_absolute() or not os.access(str(parent), os.W_OK):
+        p = Path("/tmp") / p.name
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return ":memory:"
+    return str(p)
+
+
 class SqliteContextStore:
     """Persistent, async SQLite store fulfilling ContextStoreProtocol + extensions."""
 
     def __init__(self, db_path: str = "docsync_context.db") -> None:
-        self._db_path = db_path
+        self._db_path = _resolve_writable_db_path(db_path)
         self._conn: aiosqlite.Connection | None = None
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
     async def initialize(self) -> None:
         """Open the database, enable WAL/foreign keys, and run schema migrations."""
-        self._conn = await aiosqlite.connect(self._db_path)
+        try:
+            self._conn = await aiosqlite.connect(self._db_path)
+        except sqlite3.OperationalError:
+            self._db_path = ":memory:"
+            self._conn = await aiosqlite.connect(":memory:")
+
         self._conn.row_factory = aiosqlite.Row
-        await self._conn.executescript(SCHEMA_SQL)
+
+        try:
+            await self._conn.execute("PRAGMA journal_mode=WAL;")
+        except sqlite3.OperationalError:
+            try:
+                await self._conn.execute("PRAGMA journal_mode=MEMORY;")
+            except sqlite3.OperationalError:
+                pass
+
+        try:
+            await self._conn.executescript(SCHEMA_SQL)
+        except sqlite3.OperationalError:
+            fallback_sql = SCHEMA_SQL.replace(
+                "PRAGMA journal_mode = WAL;", "PRAGMA journal_mode = MEMORY;"
+            )
+            await self._conn.executescript(fallback_sql)
+
         await self._conn.commit()
-        logger.info("SqliteContextStore initialised at %s (WAL mode)", self._db_path)
+        logger.info("SqliteContextStore initialised at %s", self._db_path)
 
     async def close(self) -> None:
         """Close the database connection cleanly."""

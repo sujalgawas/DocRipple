@@ -6,6 +6,7 @@ import logging
 
 from pydantic import BaseModel
 
+from src.context_store.sqlite_store import _resolve_writable_db_path
 from src.contracts.schemas import DocStyleSkill, DriftReport, RepoMemoryMap
 from src.orchestrator.config import OrchestratorConfig
 from src.orchestrator.github_client import HttpGitHubPublisher
@@ -66,6 +67,10 @@ class OrchestratorService:
         config: OrchestratorConfig | None = None,
     ) -> None:
         self._config = config or OrchestratorConfig()
+        if self._config.checkpoint_db_path:
+            self._config.checkpoint_db_path = _resolve_writable_db_path(
+                self._config.checkpoint_db_path
+            )
 
         inner_llm = llm_client or OpenAICompatibleLLMClient(
             base_url=self._config.llm_base_url,
