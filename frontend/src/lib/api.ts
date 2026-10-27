@@ -1,10 +1,14 @@
 /**
  * Typed API Client for DocRipple FastAPI Backend
- * Target: import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"
+ *
+ * Production (e.g. Vercel) falls back to the same origin instead of pointing at
+ * a developer's localhost. Set VITE_API_BASE_URL when the API is hosted on a
+ * different origin from the frontend.
  */
 
 const configuredApiBaseUrl =
-  import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+  import.meta.env.VITE_API_BASE_URL ||
+  (import.meta.env.DEV ? "http://localhost:8000" : "");
 
 /** Single source of truth for the FastAPI origin (no trailing slash). */
 export const API_BASE_URL = configuredApiBaseUrl.replace(/\/+$/, "");
