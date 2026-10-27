@@ -62,7 +62,7 @@ class SqliteContextStore:
         """Open the database, enable WAL/foreign keys, and run schema migrations."""
         try:
             self._conn = await aiosqlite.connect(self._db_path)
-        except Exception:
+        except Exception:  # noqa: BLE001 - fall back to in-memory on any driver error
             self._db_path = ":memory:"
             self._conn = await aiosqlite.connect(":memory:")
 
@@ -88,14 +88,23 @@ class SqliteContextStore:
             await self._conn.execute(
                 "ALTER TABLE user_settings ADD COLUMN github_token TEXT"
             )
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - column already exists
+            pass
+
+        # Added for automatic commit polling on Vercel, where a COLD start
+        # rebuilds the schema but older databases predate this column.
+        try:
+            await self._conn.execute(
+                "ALTER TABLE monitored_repos ADD COLUMN last_processed_sha TEXT"
+            )
+        except Exception:  # noqa: BLE001, S110 - column already exists
             pass
 
         try:
             await self._conn.execute(
                 "DELETE FROM activity_runs WHERE delivery_id LIKE 'seed-%'"
             )
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort cleanup
             pass
 
         await self._conn.commit()
@@ -534,6 +543,7 @@ class SqliteContextStore:
         language: str | None = None,
         webhook_id: int | None = None,
         last_pushed_at: str | None = None,
+        last_processed_sha: str | None = None,
     ) -> None:
         """Insert or update a repository watched by the web dashboard."""
         doc_paths = doc_paths or ["README.md", "docs/**/*.md"]
@@ -542,8 +552,9 @@ class SqliteContextStore:
         await self._db.execute(
             """INSERT INTO monitored_repos
                (repo_full_name, owner, name, watch_branch, doc_paths_json,
-                drift_action, status, language, webhook_id, last_pushed_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                drift_action, status, language, webhook_id, last_pushed_at,
+                last_processed_sha, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT (repo_full_name) DO UPDATE SET
                    owner = excluded.owner,
                    name = excluded.name,
@@ -551,10 +562,13 @@ class SqliteContextStore:
                    doc_paths_json = excluded.doc_paths_json,
                    drift_action = excluded.drift_action,
                    status = excluded.status,
-                   language = excluded.language,
+                   language = COALESCE(excluded.language, monitored_repos.language),
                    webhook_id = COALESCE(excluded.webhook_id, monitored_repos.webhook_id),
                    last_pushed_at = COALESCE(
                        excluded.last_pushed_at, monitored_repos.last_pushed_at
+                   ),
+                   last_processed_sha = COALESCE(
+                       excluded.last_processed_sha, monitored_repos.last_processed_sha
                    )""",
             (
                 repo_full_name,
@@ -567,8 +581,19 @@ class SqliteContextStore:
                 language,
                 webhook_id,
                 last_pushed_at,
+                last_processed_sha,
                 created_at,
             ),
+        )
+        await self._db.commit()
+
+    async def update_last_processed_sha(
+        self, repo_full_name: str, last_processed_sha: str
+    ) -> None:
+        """Advance the polling watermark for a repository."""
+        await self._db.execute(
+            "UPDATE monitored_repos SET last_processed_sha = ? WHERE repo_full_name = ?",
+            (last_processed_sha, repo_full_name),
         )
         await self._db.commit()
 

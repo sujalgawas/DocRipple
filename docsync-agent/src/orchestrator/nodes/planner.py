@@ -16,91 +16,65 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def build_planner_node(llm_client: LLMClientProtocol):
-    """Return a planner node with injected dependencies."""
+def build_planner_node(llm_client: LLMClientProtocol | None = None):
+    """Return a deterministic planner node (0 LLM calls)."""
 
     async def planner_node(state: OrchestratorState) -> dict:
-        """Convert drift_report.impacted_sections + changed_symbols into edit plans."""
-        drift: DriftReport = state["drift_report"]
-        change_report = drift.change_report
-
-        if not drift.impacted_sections:
+        """Convert drift_report.impacted_sections + changed_symbols into edit plans deterministically."""
+        drift: DriftReport | None = state.get("drift_report")
+        if not drift or not drift.impacted_sections:
             return {"edit_plans": []}
 
-        symbols_json = json.dumps(
-            [
-                {
-                    "file_path": s.file_path,
-                    "symbol_name": s.symbol_name,
-                    "symbol_kind": s.symbol_kind,
-                    "change_class": s.change_class,
-                    "change_type": s.change_type,
-                    "new_signature": s.new_signature,
-                    "diff_hunk": (s.diff_hunk or "")[:600],
-                }
-                for s in change_report.changed_symbols[:30]
-            ],
-            indent=2,
-        )
+        change_report = drift.change_report
+        all_changed = change_report.changed_symbols if change_report else []
+        subgraph: RepoMemoryMap | None = state.get("memory_subgraph")
 
-        sections_json = json.dumps(
-            [
-                {
-                    "doc_path": sec.doc_path,
-                    "heading": sec.heading,
-                    "matched_symbols": sec.matched_symbols,
-                    "match_method": sec.match_method,
-                    "confidence": sec.confidence,
-                    "current_markdown": sec.current_markdown[:2000],
-                }
-                for sec in drift.impacted_sections[:15]
-            ],
-            indent=2,
-        )
+        # Sort impacted sections by confidence descending and cap at top 2
+        sorted_sections = sorted(
+            drift.impacted_sections,
+            key=lambda s: getattr(s, "confidence", 0.0),
+            reverse=True,
+        )[:2]
 
-        memory_context = _format_memory_context(state.get("memory_subgraph"))
+        memory_context = _format_memory_context(subgraph) if subgraph else ""
 
-        user_prompt = f"""Changed Symbols:
-{symbols_json}
+        plans: list[SectionEditPlan] = []
+        for sec in sorted_sections:
+            target_symbols = list(sec.matched_symbols)
+            if not target_symbols and all_changed:
+                target_symbols = [s.symbol_name for s in all_changed[:3]]
 
-Impacted Documentation Sections:
-{sections_json}
+            # Match symbol details
+            symbol_details: list[str] = []
+            for s_name in target_symbols:
+                matched_s = next((s for s in all_changed if s.symbol_name == s_name), None)
+                if matched_s:
+                    sig_info = f", new_signature: `{matched_s.new_signature}`" if matched_s.new_signature else ""
+                    hunk_info = f", diff: {matched_s.diff_hunk[:150]}" if matched_s.diff_hunk else ""
+                    symbol_details.append(
+                        f"`{matched_s.symbol_name}` ({matched_s.symbol_kind}, {matched_s.change_type}{sig_info}{hunk_info})"
+                    )
+                else:
+                    symbol_details.append(f"`{s_name}`")
 
-Repository Memory Subgraph:
-{memory_context}
+            instructions = (
+                f"Update section '{sec.heading}' to document changed symbols: "
+                f"{'; '.join(symbol_details)}."
+            )
+            if memory_context:
+                instructions += f" Architecture context: {memory_context[:300]}."
 
-Produce a JSON array of edit plan objects. Each object must have exactly:
-- "doc_path": string
-- "heading": string
-- "target_symbols": array of strings (symbol names from the Changed Symbols list)
-- "instructions": string (what to change, referencing new_signature and diff_hunk)"""
-
-        try:
-            text = await llm_client.generate_text(PLANNER_SYSTEM_PROMPT, user_prompt)
-            raw = _extract_json_array(text)
-            if raw is not None:
-                parsed = json.loads(raw)
-                plans = [SectionEditPlan.model_validate(item) for item in parsed]
-                logger.info("Planner generated %d edit plan items", len(plans))
-                return {"edit_plans": plans}
-        except Exception:
-            logger.exception("Planner error — generating fallback plan")
-
-        # Fallback: one plan per impacted section
-        return {
-            "edit_plans": [
+            plans.append(
                 SectionEditPlan(
                     doc_path=sec.doc_path,
                     heading=sec.heading,
-                    target_symbols=sec.matched_symbols,
-                    instructions=(
-                        f"Update section to reflect changed symbols: "
-                        f"{', '.join(sec.matched_symbols) if sec.matched_symbols else 'n/a'}"
-                    ),
+                    target_symbols=target_symbols,
+                    instructions=instructions,
                 )
-                for sec in drift.impacted_sections
-            ]
-        }
+            )
+
+        logger.info("Deterministic planner generated %d edit plans (0 LLM calls)", len(plans))
+        return {"edit_plans": plans}
 
     return planner_node
 

@@ -168,8 +168,27 @@ export interface MonitoredRepo {
   language: string | null;
   webhook_id: number | null;
   last_pushed_at: string | null;
+  last_processed_sha?: string | null;
   created_at: string;
   run_count?: number;
+}
+
+/** Repository config cached in the browser so cold starts cannot lose it. */
+export interface ConnectedRepoConfig {
+  repo_full_name: string;
+  watch_branch: string;
+  doc_paths: string[];
+  drift_action: string;
+  status: "listening" | "paused";
+  last_processed_sha: string | null;
+  language?: string | null;
+}
+
+export interface PollResult {
+  triggered: string[];
+  new_runs: ActivityRun[];
+  skipped: Array<{ repo_full_name: string; reason: string }>;
+  watermarks?: Record<string, string>;
 }
 
 export interface DashboardStats {
@@ -194,6 +213,11 @@ export interface ConnectRepoPayload {
 export interface ConnectRepoResponse {
   status: "connected";
   repo_full_name: string;
+  watch_branch?: string;
+  doc_paths?: string[];
+  drift_action?: string;
+  language?: string | null;
+  last_processed_sha?: string | null;
   webhook_url: string | null;
   style_skill_summary: string;
   memory_nodes_count: number;
@@ -321,6 +345,131 @@ export function setStoredToken(token: string): void {
   } catch {}
 }
 
+// ── LocalStorage sync (survives Vercel cold starts) ─────────────────────────
+
+const CONNECTED_REPOS_KEY = "docripple_connected_repos";
+const ACTIVITY_RUNS_KEY = "docripple_activity_runs";
+const MAX_CACHED_RUNS = 200;
+
+function readJsonArray<T>(key: string): T[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeJsonArray(key: string, value: unknown[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(key, JSON.stringify(value.slice(0, MAX_CACHED_RUNS)));
+  } catch {
+    // Storage can be full or disabled; the app still works from the backend.
+  }
+}
+
+/** Recover the repository list the browser remembers. */
+export function getLocalConnectedRepos(): ConnectedRepoConfig[] {
+  return readJsonArray<ConnectedRepoConfig>(CONNECTED_REPOS_KEY).filter(
+    (repo) => Boolean(repo?.repo_full_name)
+  );
+}
+
+/** Replace the cached repository list. */
+export function saveLocalConnectedRepos(repos: ConnectedRepoConfig[]): void {
+  writeJsonArray(CONNECTED_REPOS_KEY, repos);
+}
+
+/** Insert or update one cached repository. */
+export function upsertLocalConnectedRepo(repo: ConnectedRepoConfig): void {
+  const repos = getLocalConnectedRepos();
+  const index = repos.findIndex(
+    (item) => item.repo_full_name === repo.repo_full_name
+  );
+  if (index >= 0) {
+    repos[index] = { ...repos[index], ...repo };
+  } else {
+    repos.push(repo);
+  }
+  saveLocalConnectedRepos(repos);
+}
+
+/** Update only the polling watermark for one repository. */
+export function setLocalLastProcessedSha(
+  repoFullName: string,
+  sha: string
+): void {
+  const repos = getLocalConnectedRepos();
+  const repo = repos.find((item) => item.repo_full_name === repoFullName);
+  if (!repo) return;
+  repo.last_processed_sha = sha;
+  saveLocalConnectedRepos(repos);
+}
+
+export function clearLocalSync(): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.removeItem(CONNECTED_REPOS_KEY);
+    localStorage.removeItem(ACTIVITY_RUNS_KEY);
+  } catch {}
+}
+
+function runTimestamp(run: ActivityRun): number {
+  const value = new Date(run.created_at ?? "").getTime();
+  return Number.isNaN(value) ? 0 : value;
+}
+
+/** Merge backend runs with cached runs, newest first, keyed by delivery_id. */
+export function mergeActivityRuns(
+  backendRuns: ActivityRun[],
+  cachedRuns: ActivityRun[]
+): ActivityRun[] {
+  const byId = new Map<string, ActivityRun>();
+  // Cached first so fresher backend rows overwrite them.
+  for (const run of cachedRuns) {
+    if (run?.delivery_id) byId.set(run.delivery_id, run);
+  }
+  for (const run of backendRuns) {
+    if (run?.delivery_id) byId.set(run.delivery_id, run);
+  }
+  return [...byId.values()].sort((a, b) => runTimestamp(b) - runTimestamp(a));
+}
+
+function mergeAndPersistRuns(backendRuns: ActivityRun[]): ActivityRun[] {
+  const merged = mergeActivityRuns(backendRuns, getLocalActivityRuns());
+  writeJsonArray(ACTIVITY_RUNS_KEY, merged);
+  return merged;
+}
+
+export function getLocalActivityRuns(): ActivityRun[] {
+  return readJsonArray<ActivityRun>(ACTIVITY_RUNS_KEY);
+}
+
+function cacheReposFromBackend(repositories: MonitoredRepo[]): void {
+  if (repositories.length === 0) return; // never wipe the cache on an empty response
+  const byName = new Map(
+    getLocalConnectedRepos().map((repo) => [repo.repo_full_name, repo])
+  );
+  for (const repo of repositories) {
+    const existing = byName.get(repo.repo_full_name);
+    byName.set(repo.repo_full_name, {
+      repo_full_name: repo.repo_full_name,
+      watch_branch: repo.watch_branch || existing?.watch_branch || "main",
+      doc_paths: repo.doc_paths ?? existing?.doc_paths ?? [],
+      drift_action: repo.drift_action || existing?.drift_action || "open_pr",
+      status: repo.status ?? existing?.status ?? "listening",
+      last_processed_sha:
+        repo.last_processed_sha ?? existing?.last_processed_sha ?? null,
+      language: repo.language ?? existing?.language ?? null,
+    });
+  }
+  saveLocalConnectedRepos([...byName.values()]);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getStoredToken();
   const authHeaders: Record<string, string> = {};
@@ -403,26 +552,124 @@ export function getGitHubRepos(): Promise<GitHubRepoSummary[]> {
   return request<GitHubRepoSummary[]>("/api/v1/github/repos");
 }
 
-export function connectRepository(
+export async function connectRepository(
   payload: ConnectRepoPayload
 ): Promise<ConnectRepoResponse> {
-  return request<ConnectRepoResponse>("/api/v1/repos/connect", {
+  const result = await request<ConnectRepoResponse>("/api/v1/repos/connect", {
     method: "POST",
     body: JSON.stringify(payload),
   });
+
+  // Cache immediately: a Vercel cold start can wipe the backend SQLite.
+  upsertLocalConnectedRepo({
+    repo_full_name: result.repo_full_name || payload.repo_full_name,
+    watch_branch: result.watch_branch || payload.watch_branch,
+    doc_paths: result.doc_paths ?? payload.doc_paths,
+    drift_action: result.drift_action ?? payload.drift_action,
+    status: "listening",
+    last_processed_sha: result.last_processed_sha ?? null,
+    language: result.language ?? null,
+  });
+
+  return result;
+}
+
+// ── Cold-start restore & automatic commit polling ───────────────────────────
+
+export function restoreRepositories(
+  repos: ConnectedRepoConfig[]
+): Promise<{ restored: string[]; repositories: MonitoredRepo[] }> {
+  return request<{ restored: string[]; repositories: MonitoredRepo[] }>(
+    "/api/v1/repos/restore",
+    {
+      method: "POST",
+      body: JSON.stringify({ repos }),
+    }
+  );
+}
+
+/**
+ * Ask the backend to check for new commits on listening repositories.
+ * Passing no argument polls every repo the browser remembers.
+ */
+export async function pollRepos(
+  repos?: ConnectedRepoConfig[]
+): Promise<PollResult> {
+  const candidates = (repos ?? getLocalConnectedRepos()).filter(
+    (repo) => repo.status !== "paused"
+  );
+
+  const result = await request<PollResult>("/api/v1/repos/poll", {
+    method: "POST",
+    body: JSON.stringify({
+      repos: candidates.map((repo) => ({
+        repo_full_name: repo.repo_full_name,
+        watch_branch: repo.watch_branch,
+        last_processed_sha: repo.last_processed_sha ?? null,
+        status: repo.status,
+      })),
+    }),
+  });
+
+  for (const [repoFullName, sha] of Object.entries(result.watermarks ?? {})) {
+    if (sha) setLocalLastProcessedSha(repoFullName, sha);
+  }
+  if (result.new_runs.length > 0) {
+    mergeAndPersistRuns(result.new_runs);
+  }
+
+  return result;
 }
 
 // ── Dashboard & activity ────────────────────────────────────────────────────
 
-export function getDashboard(): Promise<DashboardResponse> {
-  return request<DashboardResponse>("/api/v1/dashboard");
+export async function getDashboard(): Promise<DashboardResponse> {
+  const data = await request<DashboardResponse>("/api/v1/dashboard");
+
+  const backendNames = new Set(
+    data.repositories.map((repo) => repo.repo_full_name)
+  );
+  const missing = getLocalConnectedRepos().filter(
+    (repo) => !backendNames.has(repo.repo_full_name)
+  );
+
+  let repositories = data.repositories;
+  if (missing.length > 0) {
+    try {
+      const restored = await restoreRepositories(missing);
+      const byName = new Map(
+        [...repositories, ...restored.repositories].map((repo) => [
+          repo.repo_full_name,
+          repo,
+        ])
+      );
+      repositories = [...byName.values()];
+    } catch {
+      // Backend restore failed; keep the backend response and the local cache.
+    }
+  }
+
+  cacheReposFromBackend(repositories);
+
+  const latest_runs = mergeAndPersistRuns(data.latest_runs).slice(0, 5);
+  return { ...data, repositories, latest_runs };
 }
 
-export function getActivity(repoFullName?: string): Promise<{ runs: ActivityRun[] }> {
+export async function getActivity(
+  repoFullName?: string
+): Promise<{ runs: ActivityRun[] }> {
   const query = repoFullName
     ? `?repo_full_name=${encodeURIComponent(repoFullName)}`
     : "";
-  return request<{ runs: ActivityRun[] }>(`/api/v1/activity${query}`);
+  const data = await request<{ runs: ActivityRun[] }>(
+    `/api/v1/activity${query}`
+  );
+  const merged = mergeAndPersistRuns(data.runs);
+  return {
+    runs: repoFullName
+      ? merged.filter((run) => run.repo_full_name === repoFullName)
+      : merged,
+  };
 }
 
 export function getRepoHistory(
@@ -475,6 +722,7 @@ export function updateSettings(
 
 export async function disconnectGitHub(): Promise<DisconnectResponse> {
   setStoredToken("");
+  clearLocalSync();
   return request<DisconnectResponse>("/api/v1/settings/disconnect", {
     method: "POST",
   });

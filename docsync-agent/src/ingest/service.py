@@ -23,6 +23,7 @@ class IngestService:
         payload: dict,
         store: ContextStoreProtocol,
         queue: asyncio.Queue[WebhookJob],
+        enqueue: bool = True,
     ) -> WebhookAckResponse:
         """Process an incoming GitHub webhook event."""
         # 1. Event type filtering (ignore ping, unsupported events)
@@ -111,14 +112,23 @@ class IngestService:
             author=author,
         )
 
-        # 7. Push to background queue
-        await queue.put(job)
-        logger.info(
-            "Enqueued WebhookJob for %s (%s) from delivery %s",
-            repo_full_name,
-            event_type,
-            delivery_id,
-        )
+        # 7. Dispatch: queue for a background worker, or hand back to the
+        # caller for immediate inline execution (required on Vercel).
+        if enqueue:
+            await queue.put(job)
+            logger.info(
+                "Enqueued WebhookJob for %s (%s) from delivery %s",
+                repo_full_name,
+                event_type,
+                delivery_id,
+            )
+        else:
+            logger.info(
+                "Handing WebhookJob for %s (%s) from delivery %s to inline runner",
+                repo_full_name,
+                event_type,
+                delivery_id,
+            )
 
         return WebhookAckResponse(
             status="enqueued",

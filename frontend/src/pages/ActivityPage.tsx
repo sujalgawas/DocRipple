@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Loader2, AlertCircle, RefreshCw, Radio } from "lucide-react";
-import { getActivity } from "../services/api";
+import { getActivity, pollRepos } from "../services/api";
 import type { ActivityRun, RunStatus } from "../services/api";
 import type {
   ActivityRunItem,
@@ -275,6 +275,30 @@ export const ActivityPage: React.FC = () => {
 
   useEffect(() => {
     void load();
+  }, [load]);
+
+  // Detect new commits on listening repos even when webhooks are missed.
+  useEffect(() => {
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const result = await pollRepos();
+        if (!cancelled && result.new_runs.length > 0) {
+          await load(true);
+        }
+      } catch {
+        // Best-effort; the regular refresh below still updates the list.
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [load]);
 
   const hasRunning = useMemo(

@@ -71,8 +71,9 @@ class GitHubRepoFetcher:
         head_sha: str,
         file_paths: list[str],
     ) -> dict[str, tuple[str | None, str | None]]:
-        """Fetch before/after file blobs for modified code files."""
+        """Fetch before/after file blobs for modified code files concurrently."""
         blobs: dict[str, tuple[str | None, str | None]] = {}
+        sem = asyncio.Semaphore(8)
 
         async def _fetch_blob(client: httpx.AsyncClient, path: str, sha: str) -> str | None:
             url = f"{self.base_url}/repos/{repo_full_name}/contents/{path}?ref={sha}"
@@ -85,12 +86,17 @@ class GitHubRepoFetcher:
             except httpx.HTTPError:
                 return None
 
-        client = self._client or httpx.AsyncClient()
-        try:
-            for path in file_paths:
+        async def _fetch_pair(client: httpx.AsyncClient, path: str) -> tuple[str, tuple[str | None, str | None]]:
+            async with sem:
                 before = await _fetch_blob(client, path, base_sha)
                 after = await _fetch_blob(client, path, head_sha)
-                blobs[path] = (before, after)
+                return path, (before, after)
+
+        client = self._client or httpx.AsyncClient()
+        try:
+            results = await asyncio.gather(*[_fetch_pair(client, path) for path in file_paths])
+            for path, pair in results:
+                blobs[path] = pair
         finally:
             if not self._client:
                 await client.aclose()
@@ -98,7 +104,7 @@ class GitHubRepoFetcher:
         return blobs
 
     async def fetch_docs(self, repo_full_name: str, head_sha: str) -> dict[str, str]:
-        """Fetch all Markdown documentation files (README.md, docs/**/*.md) at head_sha."""
+        """Fetch all Markdown documentation files (README.md, docs/**/*.md) at head_sha concurrently."""
         docs: dict[str, str] = {}
         tree_url = f"{self.base_url}/repos/{repo_full_name}/git/trees/{head_sha}?recursive=1"
         headers = self._headers()
@@ -126,13 +132,25 @@ class GitHubRepoFetcher:
                 )
             ]
 
-            for path in md_files:
-                content_url = f"{self.base_url}/repos/{repo_full_name}/contents/{path}?ref={head_sha}"
-                c_res = await client.get(
-                    content_url, headers=self._headers(accept="application/vnd.github.raw")
-                )
-                if c_res.status_code == 200:
-                    docs[path] = c_res.text
+            sem = asyncio.Semaphore(8)
+
+            async def _fetch_single_doc(path: str) -> tuple[str, str | None]:
+                async with sem:
+                    content_url = f"{self.base_url}/repos/{repo_full_name}/contents/{path}?ref={head_sha}"
+                    try:
+                        c_res = await client.get(
+                            content_url, headers=self._headers(accept="application/vnd.github.raw")
+                        )
+                        if c_res.status_code == 200:
+                            return path, c_res.text
+                    except httpx.HTTPError:
+                        pass
+                    return path, None
+
+            results = await asyncio.gather(*[_fetch_single_doc(p) for p in md_files])
+            for path, text in results:
+                if text is not None:
+                    docs[path] = text
         finally:
             if not self._client:
                 await client.aclose()
@@ -329,8 +347,15 @@ class DocSyncPipeline:
             )
             return None
 
-    # ── Activity tracking helpers ─────────────────────────────────────
+    async def process_webhook(self, job: WebhookJob) -> PublishResult | None:
+        """Run a job inline from a webhook or the automatic commit poller.
 
+        Vercel freezes the function once the response is sent, so callers must
+        await this instead of relying on the background queue worker.
+        """
+        return await self.execute_job(job)
+
+    # ── Activity tracking helpers ─────────────────────────────────────
     async def _start_activity(self, job: WebhookJob) -> None:
         creator = getattr(self.context_store, "create_activity_run", None)
         if not callable(creator):

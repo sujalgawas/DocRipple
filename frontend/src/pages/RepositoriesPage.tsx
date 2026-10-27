@@ -8,7 +8,7 @@ import {
   Loader2,
   AlertCircle,
 } from "lucide-react";
-import { getAuthMe, getDashboard, triggerRepo } from "../services/api";
+import { getAuthMe, getDashboard, pollRepos, triggerRepo } from "../services/api";
 import type {
   ActivityRun,
   AuthMe,
@@ -107,6 +107,31 @@ export const RepositoriesPage: React.FC = () => {
       void load(true);
     }, 8000);
     return () => window.clearInterval(timer);
+  }, [load]);
+
+  // Automatic commit detection for ● listening repos. Webhooks are unreliable
+  // on serverless cold starts, so poll GitHub through the backend every 15s.
+  useEffect(() => {
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const result = await pollRepos();
+        if (!cancelled && result.new_runs.length > 0) {
+          await load(true);
+        }
+      } catch {
+        // Polling is best-effort; the normal refresh loop still runs.
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [load]);
 
   const repositories = dashboard?.repositories ?? [];

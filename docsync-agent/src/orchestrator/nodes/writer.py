@@ -58,8 +58,9 @@ def build_writer_node(llm_client: LLMClientProtocol):
                 )
 
         new_drafts: list[SectionDraft] = []
+        capped_plans = edit_plans[:2]
 
-        for plan in edit_plans:
+        for plan in capped_plans:
             doc_path = plan.doc_path
             heading = plan.heading
 
@@ -81,6 +82,14 @@ def build_writer_node(llm_client: LLMClientProtocol):
                         )
                         break
 
+            required_symbols_msg = (
+                f"You MUST explicitly include each of these changed symbol names: "
+                f"{', '.join(f'`{s}`' for s in plan.target_symbols)} "
+                f"in your rewritten text or code snippets."
+                if plan.target_symbols
+                else ""
+            )
+
             user_prompt = f"""Document: {doc_path}
 Section Heading: {heading}
 Instructions: {plan.instructions}
@@ -92,8 +101,12 @@ Changed Symbols:
 {chr(10).join(symbols_detail) if symbols_detail else 'None'}
 {retry_context}
 
-Output ONLY the rewritten section content as valid Markdown. Do not include the heading line itself.
-Preserve all <!-- doc-anchor: ... --> comments."""
+CRITICAL VERIFICATION RULES (MUST FOLLOW ON ATTEMPT 1):
+1. {required_symbols_msg}
+2. Ensure all code fences (```) are properly balanced and closed.
+3. Preserve all <!-- doc-anchor: ... --> comments exactly.
+
+Output ONLY the rewritten section content as valid Markdown. Do not include the heading line itself."""
 
             try:
                 new_section = await llm_client.generate_text(system_prompt, user_prompt)

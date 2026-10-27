@@ -517,16 +517,13 @@ async def test_stage0_onboarding_feeds_style_and_memory_into_orchestrator(app_wi
             )
             assert "last_published_delivery" in json.loads(doc_node["metadata_json"])
 
+    # Planner is 100% deterministic (0 LLM calls)
     planner_calls = [
         (system, user)
         for system, user in mock_llm.calls
         if "planning agent" in system.lower()
     ]
-    assert planner_calls
-    planner_prompt = planner_calls[-1][1]
-    assert "Repository Memory Subgraph" in planner_prompt
-    assert "Connected documentation sections" in planner_prompt
-    assert "README.md#Billing" in planner_prompt
+    assert len(planner_calls) == 0
 
     writer_systems = [
         system for system, _ in mock_llm.calls if "documentation writer" in system.lower()
@@ -535,9 +532,9 @@ async def test_stage0_onboarding_feeds_style_and_memory_into_orchestrator(app_wi
     assert "Repository DocStyleSkill" in writer_systems[-1]
     assert "org-repo-doc-style" in writer_systems[-1]
 
+    # Reviewer skips redundant LLM call when verifier passes clean (0 LLM calls)
     reviewer_systems = [
         system for system, _ in mock_llm.calls if "documentation reviewer" in system.lower()
     ]
-    assert reviewer_systems
-    assert "DocStyleSkill" in reviewer_systems[-1]
+    assert len(reviewer_systems) == 0
 

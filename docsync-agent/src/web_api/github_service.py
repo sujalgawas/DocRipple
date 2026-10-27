@@ -8,6 +8,7 @@ dicts that the router and pipeline can consume directly.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import fnmatch
 import ipaddress
@@ -275,17 +276,29 @@ class GitHubService:
 
             code_files: dict[str, str] = {}
             docs: dict[str, str] = {}
-            for path in source_paths:
-                content = await _fetch_raw_content(
-                    client, self._url, self._headers, repo_full_name, path, branch
-                )
+            sem = asyncio.Semaphore(8)
+
+            async def _fetch_source(path: str) -> tuple[str, str | None]:
+                async with sem:
+                    content = await _fetch_raw_content(
+                        client, self._url, self._headers, repo_full_name, path, branch
+                    )
+                    return path, content
+
+            async def _fetch_doc(path: str) -> tuple[str, str | None]:
+                async with sem:
+                    content = await _fetch_raw_content(
+                        client, self._url, self._headers, repo_full_name, path, branch
+                    )
+                    return path, content
+
+            source_results = await asyncio.gather(*[_fetch_source(p) for p in source_paths])
+            for path, content in source_results:
                 if content is not None:
                     code_files[path] = content
 
-            for path in doc_paths:
-                content = await _fetch_raw_content(
-                    client, self._url, self._headers, repo_full_name, path, branch
-                )
+            doc_results = await asyncio.gather(*[_fetch_doc(p) for p in doc_paths])
+            for path, content in doc_results:
                 if content is not None:
                     docs[path] = content
 
@@ -696,28 +709,40 @@ async def _fetch_changed_blobs(
     initial_push: bool,
 ) -> dict[str, tuple[str | None, str | None]]:
     blobs: dict[str, tuple[str | None, str | None]] = {}
+    valid_items = []
     for item in files:
-        if len(blobs) >= _MAX_BLOB_FILES:
+        if len(valid_items) >= _MAX_BLOB_FILES:
             break
         path = item.get("filename", "")
         status = item.get("status", "")
         if not path or status not in {"added", "modified", "removed", "renamed"}:
             continue
+        valid_items.append(item)
 
-        before_path = item.get("previous_filename") or path
-        before = None
-        if not initial_push and status != "added" and base_sha:
-            before = await _fetch_raw_content(
-                client, url, headers, repo_full_name, before_path, base_sha
-            )
+    sem = asyncio.Semaphore(8)
 
-        after = None
-        if status != "removed":
-            after = await _fetch_raw_content(
-                client, url, headers, repo_full_name, path, head_sha
-            )
+    async def _fetch_item_blobs(item: dict) -> tuple[str, tuple[str | None, str | None]]:
+        async with sem:
+            path = item.get("filename", "")
+            status = item.get("status", "")
+            before_path = item.get("previous_filename") or path
+            before = None
+            if not initial_push and status != "added" and base_sha:
+                before = await _fetch_raw_content(
+                    client, url, headers, repo_full_name, before_path, base_sha
+                )
 
-        blobs[path] = (before, after)
+            after = None
+            if status != "removed":
+                after = await _fetch_raw_content(
+                    client, url, headers, repo_full_name, path, head_sha
+                )
+
+            return path, (before, after)
+
+    results = await asyncio.gather(*[_fetch_item_blobs(it) for it in valid_items])
+    for path, pair in results:
+        blobs[path] = pair
 
     return blobs
 

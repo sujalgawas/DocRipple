@@ -16,6 +16,52 @@ class ConnectRepoRequest(BaseModel):
         default_factory=lambda: ["README.md", "docs/**/*.md"]
     )
     drift_action: str = "open_pr"
+    # When true, the newest commit on the branch is analyzed right away instead
+    # of being treated as the polling baseline.
+    analyze_latest: bool = False
+
+
+class RepoRestoreItem(BaseModel):
+    """A repository config cached in the browser's localStorage."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    repo_full_name: str
+    watch_branch: str = "main"
+    doc_paths: list[str] = Field(
+        default_factory=lambda: ["README.md", "docs/**/*.md"]
+    )
+    drift_action: str = "open_pr"
+    status: str = "listening"
+    last_processed_sha: str | None = None
+    language: str | None = None
+
+
+class RestoreReposRequest(BaseModel):
+    """Repositories to re-insert after a serverless cold start wiped SQLite."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    repos: list[RepoRestoreItem] = Field(default_factory=list)
+
+
+class PollRepoItem(BaseModel):
+    """A listening repository the browser wants polled for new commits."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    repo_full_name: str
+    watch_branch: str = "main"
+    last_processed_sha: str | None = None
+    status: str = "listening"
+
+
+class PollReposRequest(BaseModel):
+    """Poll request; an empty list means poll every listened repo in SQLite."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    repos: list[PollRepoItem] = Field(default_factory=list)
 
 
 class TriggerRequest(BaseModel):

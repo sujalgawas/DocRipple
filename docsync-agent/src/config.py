@@ -39,15 +39,18 @@ class AppSettings(BaseSettings):
         else "http://localhost:5173"
     )
     ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
-    LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
+    LLM_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
     LLM_API_KEY: str = "dev-key"
-    LLM_MODEL: str = "qwen/qwen-2.5-coder-32b-instruct"
+    LLM_MODEL: str = "gemma-3-27b-it"
 
     # Fallback provider configuration (e.g. OpenRouter when primary hits rate limits)
     FALLBACK_LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
     FALLBACK_LLM_API_KEY: str = ""
     FALLBACK_LLM_MODEL: str = "qwen/qwen-2.5-coder-32b-instruct"
     OPENROUTER_API_KEY: str = ""
+
+    GEMINI_API_KEY: str = ""
+    GOOGLE_API_KEY: str = ""
 
     # Vercel mounts the deployment bundle at the read-only /var/task path, so
     # SQLite must live on the writable /tmp mount instead.
@@ -71,7 +74,48 @@ class AppSettings(BaseSettings):
 
     # Runtime / Observability
     LOG_LEVEL: str = "INFO"
-    MAX_RETRIES: int = 2
+    MAX_RETRIES: int = 1
+
+    @field_validator("LLM_API_KEY", mode="before")
+    @classmethod
+    def _resolve_llm_api_key(cls, v: str | None) -> str:
+        gemini_key = (
+            os.getenv("GEMINI_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+            or ""
+        ).strip()
+        val = (v or "").strip()
+        if gemini_key and (not val or val == "dev-key" or val.startswith("gsk_")):
+            return gemini_key
+        return val or gemini_key or "dev-key"
+
+    @field_validator("LLM_BASE_URL", mode="before")
+    @classmethod
+    def _resolve_llm_base_url(cls, v: str | None) -> str:
+        val = (v or "").strip()
+        gemini_key = (
+            os.getenv("GEMINI_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+            or ""
+        ).strip()
+        llm_key = (os.getenv("LLM_API_KEY") or "").strip()
+        if gemini_key and (not llm_key or llm_key.startswith("gsk_")) and "groq.com" in val:
+            return "https://generativelanguage.googleapis.com/v1beta/openai/"
+        return val or "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+    @field_validator("LLM_MODEL", mode="before")
+    @classmethod
+    def _resolve_llm_model(cls, v: str | None) -> str:
+        val = (v or "").strip()
+        gemini_key = (
+            os.getenv("GEMINI_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+            or ""
+        ).strip()
+        llm_key = (os.getenv("LLM_API_KEY") or "").strip()
+        if gemini_key and (not llm_key or llm_key.startswith("gsk_")) and ("groq" in val or "gpt-oss" in val):
+            return "gemma-3-27b-it"
+        return val or "gemma-3-27b-it"
 
     @field_validator("FRONTEND_URL", mode="after")
     @classmethod

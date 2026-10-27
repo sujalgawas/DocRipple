@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS monitored_repos (
     language        TEXT,
     webhook_id      INTEGER,
     last_pushed_at  TEXT,
+    last_processed_sha TEXT,
     created_at      TEXT
 );
 """

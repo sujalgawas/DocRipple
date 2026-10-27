@@ -23,6 +23,8 @@ from src.web_api.github_service import GitHubService
 from src.web_api.schemas import (
     ConnectRepoRequest,
     OAuthConfigRequest,
+    PollReposRequest,
+    RestoreReposRequest,
     SettingsPatch,
     TokenAuthRequest,
     TriggerRequest,
@@ -33,6 +35,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["web_api"])
 
 ZERO_SHA = "0" * 40
+
+# Canonical backend origin used to register GitHub webhooks from Vercel, where
+# PUBLIC_WEBHOOK_URL is intentionally unset.
+VERCEL_WEBHOOK_URL = "https://docsync-agent-lyart.vercel.app/api/v1/webhooks/github"
+
+# Agent-authored commits must never re-trigger a run (infinite loop guard).
+_DOCSYNC_MESSAGE_MARKERS = ("docripple", "docsync", "docs: sync")
+_DOCSYNC_AUTHORS = ("docripple", "docsync", "docripple-bot")
 
 
 # ── Dependencies ────────────────────────────────────────────────────────
@@ -84,7 +94,7 @@ async def _resolve_github_token(request: Request) -> str:
             if db_token and db_token != "gho_fake_token":
                 _propagate_github_token(request, db_token)
                 return db_token
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - token lookup is best-effort
             pass
 
     # 4. Settings fallback from environment
@@ -188,7 +198,7 @@ def _get_oauth_callback_url(request: Request) -> str:
         if request.headers.get("x-forwarded-proto") == "https" or "vercel.app" in url:
             url = url.replace("http://", "https://", 1)
         return url
-    except Exception:
+    except Exception:  # noqa: BLE001 - fall back to the local callback URL
         return "http://localhost:8000/api/v1/auth/github/callback"
 
 
@@ -387,7 +397,7 @@ async def github_login(request: Request) -> RedirectResponse:
         {
             "client_id": settings.GITHUB_CLIENT_ID,
             "redirect_uri": redirect_uri,
-            "scope": "repo read:user",
+            "scope": "repo admin:repo_hook",
             "state": state,
         }
     )
@@ -504,7 +514,12 @@ async def connect_repo(payload: ConnectRepoRequest, request: Request) -> dict:
 
     result = await onboarding.onboard_repository(repo_full_name, code_files, docs)
 
-    webhook_url = settings.PUBLIC_WEBHOOK_URL
+    # Always register a public HTTPS webhook on Vercel; PUBLIC_WEBHOOK_URL is
+    # unset there and the deployment host is fixed.
+    if os.getenv("VERCEL"):
+        webhook_url = VERCEL_WEBHOOK_URL
+    else:
+        webhook_url = settings.PUBLIC_WEBHOOK_URL
     webhook_id: int | None = None
     webhook_error: str | None = None
     if webhook_url:
@@ -515,6 +530,20 @@ async def connect_repo(payload: ConnectRepoRequest, request: Request) -> dict:
         except Exception as exc:  # noqa: BLE001 - connection should still succeed
             logger.warning("Webhook install failed for %s: %s", repo_full_name, exc)
             webhook_error = str(exc)
+
+    # Establish the polling baseline so commits that predate the connection are
+    # not replayed. ``analyze_latest`` deliberately leaves it empty so the first
+    # poll picks the newest commit up immediately.
+    latest_sha = ""
+    try:
+        latest_commit = await service.get_latest_commit(
+            repo_full_name, payload.watch_branch
+        )
+        latest_sha = latest_commit.get("sha", "")
+    except Exception:  # noqa: BLE001 - polling simply starts empty
+        logger.debug("Could not read latest commit for %s", repo_full_name)
+
+    last_processed_sha = "" if payload.analyze_latest else latest_sha
 
     owner, name = repo_full_name.split("/", 1)
     language: str | None = None
@@ -537,6 +566,7 @@ async def connect_repo(payload: ConnectRepoRequest, request: Request) -> dict:
         language=language,
         webhook_id=webhook_id,
         last_pushed_at=last_pushed_at,
+        last_processed_sha=last_processed_sha or None,
     )
 
     summary = result.style_skill.tone_and_voice.strip()
@@ -546,6 +576,11 @@ async def connect_repo(payload: ConnectRepoRequest, request: Request) -> dict:
     response = {
         "status": "connected",
         "repo_full_name": repo_full_name,
+        "watch_branch": payload.watch_branch,
+        "doc_paths": doc_paths,
+        "drift_action": _normalize_drift_action(payload.drift_action),
+        "language": language,
+        "last_processed_sha": last_processed_sha,
         "webhook_url": webhook_url or None,
         "style_skill_summary": summary,
         "memory_nodes_count": result.memory_node_count,
@@ -554,6 +589,134 @@ async def connect_repo(payload: ConnectRepoRequest, request: Request) -> dict:
     if webhook_error:
         response["webhook_error"] = webhook_error
     return response
+
+
+# ── Cold-start recovery & automatic commit polling ──────────────────────
+
+
+@router.post("/repos/restore")
+async def restore_repos(payload: RestoreReposRequest, request: Request) -> dict:
+    """Re-insert browser-cached repositories after a serverless cold start."""
+    store = _get_store(request)
+    restored: list[str] = []
+
+    for repo in payload.repos:
+        full_name = repo.repo_full_name.strip()
+        if "/" not in full_name:
+            continue
+        owner, name = full_name.split("/", 1)
+        try:
+            await store.upsert_monitored_repo(
+                repo_full_name=full_name,
+                owner=owner,
+                name=name,
+                watch_branch=repo.watch_branch or "main",
+                doc_paths=repo.doc_paths,
+                drift_action=_normalize_drift_action(repo.drift_action),
+                status=repo.status or "listening",
+                language=repo.language,
+                last_processed_sha=repo.last_processed_sha,
+            )
+            restored.append(full_name)
+        except Exception:
+            logger.warning("Could not restore %s", full_name, exc_info=True)
+
+    repositories = await store.list_monitored_repos()
+    return {"restored": restored, "repositories": repositories}
+
+
+@router.post("/repos/poll")
+async def poll_repos(payload: PollReposRequest, request: Request) -> dict:
+    """Detect new commits for listening repositories and run the pipeline.
+
+    Vercel recycles containers, so webhooks may be missed entirely. This lets
+    the dashboard poll for new commits instead of relying on delivery.
+    """
+    store = _get_store(request)
+    await _resolve_github_token(request)
+    service = _get_github_service(request)
+    pipeline = getattr(request.app.state, "pipeline", None)
+
+    targets = await _poll_targets(store, payload)
+    triggered: list[str] = []
+    new_runs: list[dict] = []
+    skipped: list[dict] = []
+    # Every watermark the frontend should cache, including skipped commits.
+    watermarks: dict[str, str] = {}
+
+    if not service.token or pipeline is None:
+        return {
+            "triggered": triggered,
+            "new_runs": new_runs,
+            "skipped": skipped,
+            "watermarks": watermarks,
+        }
+
+    for target in targets:
+        repo_full_name = target["repo_full_name"]
+        branch = target.get("watch_branch") or "main"
+        previous = (target.get("last_processed_sha") or "").strip()
+
+        try:
+            latest = await service.get_latest_commit(repo_full_name, branch)
+        except Exception as exc:  # noqa: BLE001 - one bad repo must not stop the poll
+            logger.info("Poll found no commit for %s@%s: %s", repo_full_name, branch, exc)
+            continue
+
+        head_sha = (latest.get("sha") or "").strip()
+        if not head_sha or _is_same_commit(head_sha, previous):
+            continue
+
+        message = latest.get("message", "") or ""
+        author = latest.get("author", "") or ""
+
+        if _is_docsync_commit(message, author):
+            await _mark_processed(store, repo_full_name, head_sha)
+            watermarks[repo_full_name] = head_sha
+            skipped.append(
+                {"repo_full_name": repo_full_name, "reason": "doc-sync commit"}
+            )
+            continue
+
+        if await _commit_already_recorded(store, repo_full_name, head_sha):
+            await _mark_processed(store, repo_full_name, head_sha)
+            watermarks[repo_full_name] = head_sha
+            skipped.append(
+                {"repo_full_name": repo_full_name, "reason": "already recorded"}
+            )
+            continue
+
+        # Advance the watermark before running so a slow or failed run is not
+        # retried on every poll.
+        await _mark_processed(store, repo_full_name, head_sha)
+        watermarks[repo_full_name] = head_sha
+
+        job = WebhookJob(
+            delivery_id=f"auto-{head_sha[:12]}",
+            event_type="push",
+            repo_full_name=repo_full_name,
+            base_sha=latest.get("parent_sha") or ZERO_SHA,
+            head_sha=head_sha,
+            ref=f"refs/heads/{branch}",
+            received_at=datetime.now(UTC),
+            commit_message=message,
+            author=author,
+        )
+        try:
+            result = await pipeline.process_webhook(job)
+        except Exception:
+            logger.exception("Poll pipeline failed for %s", repo_full_name)
+            continue
+
+        triggered.append(repo_full_name)
+        new_runs.append(_run_payload(job, result))
+
+    return {
+        "triggered": triggered,
+        "new_runs": new_runs,
+        "skipped": skipped,
+        "watermarks": watermarks,
+    }
 
 
 # ── Dashboard ───────────────────────────────────────────────────────────
@@ -581,7 +744,7 @@ async def dashboard(request: Request) -> dict:
                     repository["watch_branch"] = repo_info["default_branch"]
                 if repo_info.get("language"):
                     repository["language"] = repo_info["language"]
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - metadata refresh is optional
                 pass
 
     latest_runs = await store.list_activity_runs(limit=5)
@@ -651,7 +814,7 @@ async def activity(
                         "pr_number": None,
                         "pr_url": None,
                     })
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - one repo must not fail the page
                 logger.warning("Could not fetch commits for %s: %s", r_name, exc)
 
     return {"runs": synthesized_runs}
@@ -1047,3 +1210,117 @@ def _is_same_commit(sha1: str | None, sha2: str | None) -> bool:
     s1 = sha1.strip().lower()
     s2 = sha2.strip().lower()
     return s1 == s2 or s1.startswith(s2) or s2.startswith(s1)
+
+
+def _is_docsync_commit(message: str, author: str) -> bool:
+    """Return True for commits authored by DocRipple itself."""
+    lowered = (message or "").lower()
+    if any(marker in lowered for marker in _DOCSYNC_MESSAGE_MARKERS):
+        return True
+    return (author or "").strip().lower() in _DOCSYNC_AUTHORS
+
+
+async def _mark_processed(store, repo_full_name: str, sha: str) -> None:
+    """Advance the polling watermark, tolerating older stores."""
+    updater = getattr(store, "update_last_processed_sha", None)
+    if not callable(updater):
+        return
+    try:
+        await updater(repo_full_name, sha)
+    except Exception:  # noqa: BLE001 - watermark update is best-effort
+        logger.debug("Could not persist last_processed_sha for %s", repo_full_name)
+
+
+async def _commit_already_recorded(store, repo_full_name: str, sha: str) -> bool:
+    """True when an activity run already exists for this commit."""
+    lister = getattr(store, "list_activity_runs", None)
+    if not callable(lister):
+        return False
+    try:
+        runs = await lister(repo_full_name=repo_full_name)
+    except Exception:  # noqa: BLE001 - absence of history means "not recorded"
+        return False
+    return any(_is_same_commit(run.get("commit_sha"), sha) for run in runs)
+
+
+async def _poll_targets(store, payload: PollReposRequest) -> list[dict]:
+    """Resolve which repositories the poll should check.
+
+    Repositories supplied by the browser are authoritative because a cold start
+    may have wiped SQLite; missing rows are recreated so polling keeps working.
+    """
+    monitored = {
+        repo["repo_full_name"]: repo for repo in await store.list_monitored_repos()
+    }
+
+    requested = [
+        repo
+        for repo in payload.repos
+        if repo.repo_full_name.strip() and "/" in repo.repo_full_name
+    ]
+
+    if requested:
+        targets: list[dict] = []
+        for repo in requested:
+            full_name = repo.repo_full_name.strip()
+            if (repo.status or "listening").lower() == "paused":
+                continue
+            stored = monitored.get(full_name)
+            if stored is None:
+                owner, name = full_name.split("/", 1)
+                try:
+                    await store.upsert_monitored_repo(
+                        repo_full_name=full_name,
+                        owner=owner,
+                        name=name,
+                        watch_branch=repo.watch_branch or "main",
+                        status="listening",
+                        last_processed_sha=repo.last_processed_sha,
+                    )
+                except Exception:  # noqa: BLE001 - recreate lazily; polling may still work
+                    logger.debug("Could not restore %s before polling", full_name)
+                stored = monitored.get(full_name)
+            targets.append(
+                {
+                    "repo_full_name": full_name,
+                    "watch_branch": (stored or {}).get("watch_branch")
+                    or repo.watch_branch
+                    or "main",
+                    "last_processed_sha": (
+                        repo.last_processed_sha
+                        if repo.last_processed_sha is not None
+                        else (stored or {}).get("last_processed_sha")
+                    ),
+                }
+            )
+        return targets
+
+    return [
+        repo
+        for repo in monitored.values()
+        if (repo.get("status") or "listening") == "listening"
+    ]
+
+
+def _run_payload(job: WebhookJob, result) -> dict:
+    """Serialize a pipeline result for the poll response."""
+    pr_url = getattr(result, "pr_url", None)
+    verification = getattr(result, "verification_status", "") or ""
+    if pr_url:
+        status_value = "pr_open"
+    elif verification == "failed":
+        status_value = "failed"
+    else:
+        status_value = "no_drift"
+    return {
+        "delivery_id": job.delivery_id,
+        "repo_full_name": job.repo_full_name,
+        "commit_sha": job.head_sha,
+        "commit_message": job.commit_message,
+        "author": job.author,
+        "status": status_value,
+        "pr_url": pr_url,
+        "pr_number": getattr(result, "pr_number", None),
+        "evidence_table_md": getattr(result, "evidence_table_md", ""),
+        "created_at": datetime.now(UTC).isoformat(),
+    }

@@ -51,6 +51,9 @@ class FakeLLMClient:
 
     async def generate_text(self, system_prompt: str, user_prompt: str) -> str:
         self._text_calls.append((system_prompt[:100], user_prompt[:100]))
+        # With deterministic planner (0 LLM calls), ignore any queued planner responses (JSON array)
+        while self._text_responses and self._text_responses[0].strip().startswith("[") and ("writer" in system_prompt.lower() or "documentation writer" in system_prompt.lower()):
+            self._text_responses.pop(0)
         if self._text_responses:
             return self._text_responses.pop(0)
         return "APPROVED"
