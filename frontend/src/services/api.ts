@@ -8,7 +8,12 @@
 import { API_BASE_URL } from "../lib/api";
 
 export { API_BASE_URL };
-export const API_BASE = API_BASE_URL;
+// Strip any trailing slash so requests never build paths like
+// `https://backend.vercel.app//api/v1/auth/me`, which Vercel answers with 404.
+export const API_BASE = (import.meta.env.VITE_API_BASE_URL || API_BASE_URL).replace(
+  /\/+$/,
+  ""
+);
 
 // ── Shared models ───────────────────────────────────────────────────────────
 

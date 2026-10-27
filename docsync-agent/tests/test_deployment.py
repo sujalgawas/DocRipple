@@ -37,14 +37,14 @@ async def test_health_supports_get_and_head() -> None:
     "origin",
     [
         "https://docripple.vercel.app",
+        "https://docsync-agent-lyart.vercel.app",
         "https://docripple-git-main-sujalgawas.vercel.app",
-        "https://docripple.pages.dev",
         "http://localhost:5173",
         "http://localhost:3000",
     ],
 )
 async def test_cors_allows_configured_and_preview_origins(origin: str) -> None:
-    """Configured origins and Vercel/Pages previews pass preflight checks."""
+    """Configured origins and Vercel previews pass preflight checks."""
     transport = ASGITransport(app=app)
     async with AsyncClient(
         transport=transport, base_url="http://testserver"
@@ -60,6 +60,58 @@ async def test_cors_allows_configured_and_preview_origins(origin: str) -> None:
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == origin
     assert response.headers["access-control-allow-credentials"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_cors_ignores_unknown_origin() -> None:
+    """Origins outside the allow-list must not receive CORS headers."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.options(
+            "/health",
+            headers={
+                "Origin": "https://evil.example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_unhandled_exception_returns_cors_readable_json() -> None:
+    """A 500 must stay readable from the browser instead of a CORS failure."""
+    from fastapi import APIRouter
+
+    boom = APIRouter()
+
+    @boom.get("/__boom_for_test")
+    async def _boom() -> dict:
+        raise RuntimeError("kaboom")
+
+    app.include_router(boom)
+    try:
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get(
+                "/__boom_for_test",
+                headers={"Origin": "https://docripple.vercel.app"},
+            )
+    finally:
+        app.router.routes = [
+            route
+            for route in app.router.routes
+            if getattr(route, "path", None) != "/__boom_for_test"
+        ]
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Internal server error"
+    assert response.headers["access-control-allow-origin"] == "*"
 
 
 @pytest.mark.asyncio

@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import os
 
-# Vercel runs the app from the read-only /var/task filesystem. Redirect HOME so
-# any library that writes cache or model files lands on the writable /tmp mount.
-os.environ.setdefault("HOME", "/tmp")
+# Vercel runs the app from the read-only /var/task filesystem. This must run
+# before any local import, because src.config resolves these values at import
+# time. Redirect HOME so libraries writing cache/model files land on the
+# writable /tmp mount, and point SQLite at /tmp for the same reason.
+if os.getenv("VERCEL"):
+    os.environ.setdefault("HOME", "/tmp")
+    os.environ.setdefault("SQLITE_DB_PATH", "/tmp/docsync_context.db")
+    os.environ.setdefault("CHECKPOINT_DB_PATH", "/tmp/docsync_checkpoints.db")
 
 import asyncio
 import logging
@@ -16,6 +21,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.analyzer.service import ChangeAnalyzerService
@@ -50,15 +56,25 @@ logger = logging.getLogger("docsync")
 
 SEED_REPO_FULL_NAME = "sujalgawas/DocRipple"
 
-CORS_ORIGIN_REGEX = (
-    r"^https://.*\.vercel\.app$|^https://.*\.pages\.dev$|^http://localhost:\d+$"
+# Origins that must always work, regardless of how the env vars are configured.
+# A trailing slash in FRONTEND_URL would otherwise make every credentialed
+# request fail the CORS check, which the browser reports as a network error.
+_CANONICAL_ORIGINS = (
+    "https://docripple.vercel.app",
+    "https://docsync-agent-lyart.vercel.app",
 )
+
+CORS_ORIGIN_REGEX = r"^https://.*\.vercel\.app$|^http://localhost:\d+$"
 
 
 def _cors_origins() -> list[str]:
     """Return the deduplicated CORS allow-list from environment settings."""
     origins: list[str] = []
-    for raw_origin in (settings.FRONTEND_URL, *settings.ALLOWED_ORIGINS.split(",")):
+    for raw_origin in (
+        settings.FRONTEND_URL,
+        *_CANONICAL_ORIGINS,
+        *settings.ALLOWED_ORIGINS.split(","),
+    ):
         origin = raw_origin.strip().rstrip("/")
         if origin and origin not in origins:
             origins.append(origin)
@@ -428,6 +444,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Starlette applies user middleware outermost-first, and add_middleware prepends,
+# so this stays the outermost layer: CORS headers are attached even when a route
+# raises before reaching the router.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
@@ -436,6 +455,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    """Return a CORS-readable JSON error instead of an opaque network failure.
+
+    Unhandled exceptions bypass CORSMiddleware, so without an explicit header the
+    browser reports a CORS/network error and the dashboard shows
+    "Backend not reachable" even though the server answered.
+    """
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Internal server error", "path": request.url.path},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 # Mount Stage 1 webhook router, Stage 0 onboarding router, and web API bridge
 app.include_router(ingest_router)

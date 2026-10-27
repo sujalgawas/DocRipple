@@ -90,6 +90,11 @@ def _require_github_token(service: GitHubService) -> None:
         )
 
 
+def _frontend_base() -> str:
+    """Return the frontend origin without a trailing slash."""
+    return (settings.FRONTEND_URL or "").rstrip("/")
+
+
 def _github_failure(exc: Exception) -> HTTPException:
     logger.warning("GitHub API call failed: %s", exc)
     if isinstance(exc, httpx.HTTPStatusError):
@@ -266,7 +271,7 @@ async def github_login(request: Request) -> RedirectResponse:
     """Start OAuth, or fall back to the PAT-backed dashboard."""
     if not settings.GITHUB_CLIENT_ID:
         return RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/repositories", status_code=307
+            url=f"{_frontend_base()}/repositories", status_code=307
         )
 
     state = uuid4().hex
@@ -325,7 +330,7 @@ async def github_callback(
         raise _github_failure(exc) from exc
 
     return RedirectResponse(
-        url=f"{settings.FRONTEND_URL}/repositories/new", status_code=307
+        url=f"{_frontend_base()}/repositories/new", status_code=307
     )
 
 

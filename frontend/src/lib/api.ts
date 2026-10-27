@@ -1,14 +1,17 @@
 /**
  * Typed API Client for DocRipple FastAPI Backend
  *
- * Production (e.g. Vercel) falls back to the same origin instead of pointing at
- * a developer's localhost. Set VITE_API_BASE_URL when the API is hosted on a
- * different origin from the frontend.
+ * `VITE_API_BASE_URL` wins when set (CI/production). Otherwise local dev targets
+ * the Vite dev server's API and a production build targets the deployed API,
+ * never a developer's localhost. Any trailing slash is stripped so paths such as
+ * `/api/v1/auth/me` never become `//api/v1/auth/me` (which 404s on Vercel).
  */
+
+const DEFAULT_PRODUCTION_API = "https://docsync-agent-lyart.vercel.app";
 
 const configuredApiBaseUrl =
   import.meta.env.VITE_API_BASE_URL ||
-  (import.meta.env.DEV ? "http://localhost:8000" : "");
+  (import.meta.env.DEV ? "http://localhost:8000" : DEFAULT_PRODUCTION_API);
 
 /** Single source of truth for the FastAPI origin (no trailing slash). */
 export const API_BASE_URL = configuredApiBaseUrl.replace(/\/+$/, "");

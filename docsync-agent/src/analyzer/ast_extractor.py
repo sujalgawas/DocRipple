@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import logging
 import os
+import re
 from typing import TYPE_CHECKING, Any
 
 from src.analyzer.exceptions import SymbolExtractionError
@@ -19,6 +20,20 @@ if TYPE_CHECKING:
     from tree_sitter import Node
 
 logger = logging.getLogger(__name__)
+
+# tree-sitter ships a native extension. On some serverless images (Vercel's
+# Amazon Linux runtime) that shared object fails to load; an unguarded import
+# would then crash the entire FastAPI app at startup with
+# FUNCTION_INVOCATION_FAILED. Probe it once and degrade to the stdlib/regex
+# extractors instead.
+try:  # pragma: no cover - depends on the platform's native wheels
+    from tree_sitter_language_pack import get_parser as _get_parser
+except Exception:  # native loader errors are arbitrary
+    _get_parser = None
+    logger.warning(
+        "tree-sitter-language-pack unavailable; using regex symbol extraction",
+        exc_info=True,
+    )
 
 # ── Language support ──────────────────────────────────────────────────────
 
@@ -98,6 +113,13 @@ def extract_symbols_from_source(
                 exc_info=True,
             )
 
+    # ── Regex fallback when tree-sitter cannot load on this platform ──
+    try:
+        source_str = source if isinstance(source, str) else source.decode("utf-8")
+        return _extract_with_regex(source_str, ext)
+    except Exception:
+        logger.debug("Regex extraction failed for %s", file_path, exc_info=True)
+
     return []
 
 
@@ -109,10 +131,11 @@ def _extract_with_tree_sitter(
     file_path: str,
 ) -> list[ExtractedSymbolSpan]:
     """Extract symbols using tree-sitter-language-pack."""
-    from tree_sitter_language_pack import get_parser
+    if _get_parser is None:
+        raise SymbolExtractionError("tree-sitter-language-pack is not available")
 
     source_bytes = source if isinstance(source, bytes) else source.encode("utf-8")
-    parser = get_parser(lang)
+    parser = _get_parser(lang)
     tree = parser.parse(source_bytes)
     root = tree.root_node
 
@@ -232,6 +255,76 @@ def _map_node_type(lang: str, node_type: str) -> str:
     if node_type in method_like:
         return "method"
     return "function"
+
+
+# ── Regex fallback (no native parser available) ──────────────────────────
+
+# Matches the leading declaration of a class-like symbol for each extension.
+_REGEX_CLASS_PATTERNS: dict[str, re.Pattern[str]] = {
+    ".ts": re.compile(
+        r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)"
+    ),
+    ".tsx": re.compile(
+        r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)"
+    ),
+    ".js": re.compile(r"^\s*(?:export\s+)?(?:default\s+)?class\s+([A-Za-z_$][\w$]*)"),
+    ".jsx": re.compile(r"^\s*(?:export\s+)?(?:default\s+)?class\s+([A-Za-z_$][\w$]*)"),
+    ".go": re.compile(r"^\s*type\s+([A-Za-z_]\w*)\s+(?:struct|interface)\b"),
+    ".rs": re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Za-z_]\w*)"),
+}
+
+# Matches the leading declaration of a function-like symbol for each extension.
+_REGEX_FUNCTION_PATTERNS: dict[str, re.Pattern[str]] = {
+    ".ts": re.compile(
+        r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)"
+    ),
+    ".tsx": re.compile(
+        r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)"
+    ),
+    ".js": re.compile(
+        r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)"
+    ),
+    ".jsx": re.compile(
+        r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)"
+    ),
+    ".go": re.compile(r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\("),
+    ".rs": re.compile(
+        r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_]\w*)"
+    ),
+}
+
+
+def _extract_with_regex(source: str, ext: str) -> list[ExtractedSymbolSpan]:
+    """Best-effort declaration scan used when no native parser is available."""
+    class_pattern = _REGEX_CLASS_PATTERNS.get(ext)
+    function_pattern = _REGEX_FUNCTION_PATTERNS.get(ext)
+    if class_pattern is None and function_pattern is None:
+        return []
+
+    symbols: list[ExtractedSymbolSpan] = []
+    for lineno, line in enumerate(source.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("//", "/*", "*")):
+            continue
+
+        for pattern, kind in ((class_pattern, "class"), (function_pattern, "function")):
+            if pattern is None:
+                continue
+            match = pattern.match(line)
+            if match is not None:
+                symbols.append(
+                    ExtractedSymbolSpan(
+                        name=match.group(1),
+                        kind=kind,
+                        signature=stripped,
+                        start_line=lineno,
+                        end_line=lineno,
+                        decorators=[],
+                    )
+                )
+                break
+
+    return symbols
 
 
 # ── Python stdlib ast fallback ────────────────────────────────────────────

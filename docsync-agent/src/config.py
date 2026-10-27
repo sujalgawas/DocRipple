@@ -29,7 +29,13 @@ class AppSettings(BaseSettings):
         else "https://docripple-api.onrender.com/api/v1/webhooks/github"
     )
     GITHUB_WEBHOOK_SECRET: str = "docripple-secret"
-    FRONTEND_URL: str = "http://localhost:5173"
+    # Local development talks to the Vite dev server; deployed Vercel builds
+    # must redirect back to the public frontend, never to localhost.
+    FRONTEND_URL: str = (
+        "https://docripple.vercel.app"
+        if os.getenv("VERCEL")
+        else "http://localhost:5173"
+    )
     ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
     LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
     LLM_API_KEY: str = "dev-key"

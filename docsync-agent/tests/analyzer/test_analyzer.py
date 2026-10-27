@@ -323,3 +323,34 @@ async def test_hunk_only_extraction():
     assert len(report.changed_symbols) >= 1
     names = [s.symbol_name for s in report.changed_symbols]
     assert "foo" in names
+
+# -- Edge-case: tree-sitter native binary unavailable ----------------------
+
+
+def test_regex_fallback_when_tree_sitter_unavailable(monkeypatch: pytest.MonkeyPatch):
+    """A failed tree-sitter load must degrade to regex, not crash the app."""
+    from src.analyzer import ast_extractor
+
+    monkeypatch.setattr(ast_extractor, "_get_parser", None)
+
+    source = "export class BillingService {\nexport async function calcTotal() {\n"
+    spans = ast_extractor.extract_symbols_from_source(source, "src/billing.ts")
+
+    assert {span.name for span in spans} == {"BillingService", "calcTotal"}
+    assert {span.kind for span in spans} == {"class", "function"}
+
+
+def test_python_ast_still_works_when_tree_sitter_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Python files keep using the stdlib ast extractor."""
+    from src.analyzer import ast_extractor
+
+    monkeypatch.setattr(ast_extractor, "_get_parser", None)
+
+    spans = ast_extractor.extract_symbols_from_source(
+        "def compute(x: int) -> int:\n    return x\n", "src/utils.py"
+    )
+
+    assert [span.name for span in spans] == ["compute"]
+    assert spans[0].kind == "function"
