@@ -8,12 +8,15 @@
 import { API_BASE_URL } from "../lib/api";
 
 export { API_BASE_URL };
-// Strip any trailing slash so requests never build paths like
-// `https://backend.vercel.app//api/v1/auth/me`, which Vercel answers with 404.
-export const API_BASE = (import.meta.env.VITE_API_BASE_URL || API_BASE_URL).replace(
-  /\/+$/,
-  ""
-);
+
+const isLocalhost =
+  typeof window !== "undefined" &&
+  (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+
+export const API_BASE = (
+  import.meta.env.VITE_API_BASE_URL ||
+  (isLocalhost ? "http://localhost:8000" : "https://docsync-agent-lyart.vercel.app")
+).replace(/\/+$/, "");
 
 // ── Shared models ───────────────────────────────────────────────────────────
 
@@ -324,7 +327,11 @@ export function getAuthConfig(): Promise<AuthConfig> {
 }
 
 export function githubLoginUrl(): string {
-  return `${API_BASE}/api/v1/auth/github/login`;
+  const frontendUrl =
+    typeof window !== "undefined" && window.location.origin
+      ? `?frontend_url=${encodeURIComponent(window.location.origin)}`
+      : "";
+  return `${API_BASE}/api/v1/auth/github/login${frontendUrl}`;
 }
 
 export function loginWithToken(token: string): Promise<AuthMe> {

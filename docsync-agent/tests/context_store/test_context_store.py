@@ -282,6 +282,12 @@ def test_settings_db_path_validator(monkeypatch: pytest.MonkeyPatch):
     s_vercel = AppSettings(
         SQLITE_DB_PATH="/var/task/docsync_context.db",
         CHECKPOINT_DB_PATH="/var/task/checkpoints.db",
+        FRONTEND_URL="http://localhost:5173/",
     )
     assert s_vercel.SQLITE_DB_PATH == "/tmp/docsync_context.db"
     assert s_vercel.CHECKPOINT_DB_PATH == "/tmp/checkpoints.db"
+    assert s_vercel.FRONTEND_URL == "https://docripple.vercel.app"
+
+    monkeypatch.delenv("VERCEL", raising=False)
+    s_local = AppSettings(FRONTEND_URL="http://localhost:5173/")
+    assert s_local.FRONTEND_URL == "http://localhost:5173"

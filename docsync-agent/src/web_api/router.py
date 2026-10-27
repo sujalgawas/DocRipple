@@ -8,8 +8,9 @@ user settings. All state is backed by SQLite and the real GitHub REST API.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from uuid import uuid4
 
 import httpx
@@ -90,8 +91,56 @@ def _require_github_token(service: GitHubService) -> None:
         )
 
 
-def _frontend_base() -> str:
+def _get_frontend_url(request: Request) -> str:
+    """Dynamically resolve frontend origin from query param, headers, or settings."""
+    query_frontend = request.query_params.get("frontend_url")
+    if query_frontend:
+        target = query_frontend.strip().rstrip("/")
+        if bool(os.getenv("VERCEL")) and "localhost" in target:
+            return "https://docripple.vercel.app"
+        return target
+
+    origin = request.headers.get("origin")
+    if origin:
+        target = origin.strip().rstrip("/")
+        if bool(os.getenv("VERCEL")) and "localhost" in target:
+            return "https://docripple.vercel.app"
+        return target
+
+    referer = request.headers.get("referer")
+    if referer:
+        parsed = urlparse(referer)
+        if parsed.scheme and parsed.netloc:
+            target = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+            if bool(os.getenv("VERCEL")) and "localhost" in target:
+                return "https://docripple.vercel.app"
+            return target
+
+    if bool(os.getenv("VERCEL")) and ("localhost" in settings.FRONTEND_URL or not settings.FRONTEND_URL):
+        return "https://docripple.vercel.app"
+
+    return settings.FRONTEND_URL.rstrip("/")
+
+
+def _get_oauth_callback_url(request: Request) -> str:
+    """Build live OAuth redirect URI dynamically."""
+    if os.getenv("VERCEL"):
+        return "https://docsync-agent-lyart.vercel.app/api/v1/auth/github/callback"
+    try:
+        url = str(request.url_for("github_callback"))
+        if request.headers.get("x-forwarded-proto") == "https" or "vercel.app" in url:
+            url = url.replace("http://", "https://", 1)
+        return url
+    except Exception:
+        return "http://localhost:8000/api/v1/auth/github/callback"
+
+
+def _frontend_base(request: Request | None = None) -> str:
     """Return the frontend origin without a trailing slash."""
+    if request is not None:
+        return _get_frontend_url(request)
+    if bool(os.getenv("VERCEL")) and ("localhost" in settings.FRONTEND_URL or not settings.FRONTEND_URL):
+        return "https://docripple.vercel.app"
     return (settings.FRONTEND_URL or "").rstrip("/")
 
 
@@ -193,13 +242,7 @@ def _update_env_file(updates: dict[str, str]) -> None:
 @router.get("/auth/config")
 async def get_auth_config(request: Request) -> dict:
     """Return whether OAuth is configured and the live callback URL."""
-    # Derive the callback from the incoming request so deployed environments
-    # (Vercel/Render) never advertise a localhost redirect URI.
-    try:
-        callback_url = str(request.url_for("github_callback"))
-    except Exception:  # noqa: BLE001 - config info must never 500
-        callback_url = ""
-
+    callback_url = _get_oauth_callback_url(request)
     return {
         "oauth_configured": bool(settings.GITHUB_CLIENT_ID and settings.GITHUB_CLIENT_SECRET),
         "client_id": settings.GITHUB_CLIENT_ID or None,
@@ -269,14 +312,16 @@ async def save_oauth_config(payload: OAuthConfigRequest) -> dict:
 @router.get("/auth/github/login")
 async def github_login(request: Request) -> RedirectResponse:
     """Start OAuth, or fall back to the PAT-backed dashboard."""
+    frontend_url = _get_frontend_url(request)
     if not settings.GITHUB_CLIENT_ID:
         return RedirectResponse(
-            url=f"{_frontend_base()}/repositories", status_code=307
+            url=f"{frontend_url}/repositories", status_code=307
         )
 
     state = uuid4().hex
     request.app.state.oauth_state = state
-    redirect_uri = str(request.url_for("github_callback"))
+    request.app.state.oauth_frontend_url = frontend_url
+    redirect_uri = _get_oauth_callback_url(request)
     request.app.state.oauth_redirect_uri = redirect_uri
     query = urlencode(
         {
@@ -299,6 +344,10 @@ async def github_callback(
     state: str = Query(default=""),
 ) -> RedirectResponse:
     """Complete OAuth and send the user directly to the Add Repository picker."""
+    frontend_url = (
+        getattr(request.app.state, "oauth_frontend_url", "")
+        or _get_frontend_url(request)
+    )
     expected_state = getattr(request.app.state, "oauth_state", "")
     if not expected_state or state != expected_state:
         raise HTTPException(
@@ -307,7 +356,11 @@ async def github_callback(
         )
     # State is single-use; consume it before exchanging the code.
     request.app.state.oauth_state = ""
-    redirect_uri = getattr(request.app.state, "oauth_redirect_uri", "")
+    request.app.state.oauth_frontend_url = ""
+    redirect_uri = (
+        getattr(request.app.state, "oauth_redirect_uri", "")
+        or _get_oauth_callback_url(request)
+    )
     request.app.state.oauth_redirect_uri = ""
     if not code:
         raise HTTPException(
@@ -330,7 +383,7 @@ async def github_callback(
         raise _github_failure(exc) from exc
 
     return RedirectResponse(
-        url=f"{settings.FRONTEND_URL.rstrip('/')}/repositories", status_code=307
+        url=f"{frontend_url}/repositories", status_code=307
     )
 
 

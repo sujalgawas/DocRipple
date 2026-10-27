@@ -304,3 +304,16 @@ async def test_auth_github_callback_redirects_to_repositories(app, monkeypatch):
         )
     assert response.status_code == 307
     assert response.headers["location"] == "https://docripple.vercel.app/repositories"
+
+
+@pytest.mark.asyncio
+async def test_auth_login_uses_dynamic_frontend_url(app, monkeypatch):
+    test_app, _, _ = app
+    monkeypatch.setattr(settings, "GITHUB_CLIENT_ID", "")
+    transport = ASGITransport(app=test_app)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", follow_redirects=False
+    ) as client:
+        response = await client.get("/api/v1/auth/github/login?frontend_url=https://custom-app.com")
+    assert response.status_code == 307
+    assert response.headers["location"] == "https://custom-app.com/repositories"

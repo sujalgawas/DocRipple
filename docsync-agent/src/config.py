@@ -26,9 +26,9 @@ class AppSettings(BaseSettings):
     # connect_repo then skips webhook installation instead of registering a
     # webhook that points at a different service.
     PUBLIC_WEBHOOK_URL: str = (
-        ""
+        "https://docsync-agent-lyart.vercel.app/api/v1/webhooks/github"
         if os.getenv("VERCEL")
-        else "https://docripple-api.onrender.com/api/v1/webhooks/github"
+        else ""
     )
     GITHUB_WEBHOOK_SECRET: str = "docripple-secret"
     # Local development talks to the Vite dev server; deployed Vercel builds
@@ -66,6 +66,14 @@ class AppSettings(BaseSettings):
     # Runtime / Observability
     LOG_LEVEL: str = "INFO"
     MAX_RETRIES: int = 2
+
+    @field_validator("FRONTEND_URL", mode="after")
+    @classmethod
+    def _normalize_frontend_url(cls, v: str) -> str:
+        clean = (v or "").strip().rstrip("/")
+        if bool(os.getenv("VERCEL")) and ("localhost" in clean or not clean):
+            return "https://docripple.vercel.app"
+        return clean or "http://localhost:5173"
 
     @field_validator("SQLITE_DB_PATH", "CHECKPOINT_DB_PATH", mode="after")
     @classmethod

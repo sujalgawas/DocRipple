@@ -182,10 +182,10 @@ async def test_auth_config_callback_uses_request_host() -> None:
     assert "localhost" not in callback_url
 
 
-def test_public_webhook_url_defaults_blank_on_vercel(
+def test_public_webhook_url_defaults_on_vercel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On Vercel, never default the webhook to the Render hostname."""
+    """On Vercel, default to the Vercel deployment URLs and strip localhost."""
     import importlib
 
     import src.config as config_module
@@ -193,7 +193,13 @@ def test_public_webhook_url_defaults_blank_on_vercel(
     monkeypatch.setenv("VERCEL", "1")
     try:
         reloaded = importlib.reload(config_module)
-        assert reloaded.AppSettings().PUBLIC_WEBHOOK_URL == ""
+        assert (
+            reloaded.AppSettings().PUBLIC_WEBHOOK_URL
+            == "https://docsync-agent-lyart.vercel.app/api/v1/webhooks/github"
+        )
+        assert (
+            reloaded.AppSettings().FRONTEND_URL == "https://docripple.vercel.app"
+        )
     finally:
         monkeypatch.delenv("VERCEL", raising=False)
         importlib.reload(config_module)
