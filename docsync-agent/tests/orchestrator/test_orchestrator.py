@@ -283,6 +283,76 @@ async def test_happy_path_planner_to_publisher():
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# Regression: untouched docs must not be published or verified
+# ════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_only_changed_docs_are_published():
+    """Docs that were not rewritten stay out of the PR and the verifier.
+
+    ``docs/other.md`` deliberately contains a pre-existing unbalanced code
+    fence: it must not fail the run because no edit plan targets it.
+    """
+    symbol = _make_changed_symbol("create_user")
+    change_report = _make_change_report(
+        delivery_id="test-only-changed", symbols=[symbol]
+    )
+
+    original_doc = (
+        "## create_user\n\n<!-- doc-anchor: create-user -->\n\n"
+        "Creates a user.\n\n```python\n"
+        "async def create_user(email: str) -> dict:\n"
+        "    ...\n```\n"
+    )
+    untouched_doc = "# Other\n\n```python\nprint('unclosed')\n"
+
+    section = _make_impacted_section(
+        doc_path="docs/api.md",
+        heading="create_user",
+        symbols=["create_user"],
+        markdown=original_doc,
+    )
+    drift_report = _make_drift_report(change_report, sections=[section])
+    full_docs = {"docs/api.md": original_doc, "docs/other.md": untouched_doc}
+
+    planner_response = json.dumps(
+        [
+            {
+                "doc_path": "docs/api.md",
+                "heading": "create_user",
+                "target_symbols": ["create_user"],
+                "instructions": "Document the email parameter.",
+            }
+        ]
+    )
+    writer_response = (
+        "Creates a user with an email address.\n\n"
+        "<!-- doc-anchor: create-user -->\n\n"
+        "```python\nasync def create_user(email: str) -> dict:\n    ...\n```\n"
+    )
+
+    fake_llm = FakeLLMClient(
+        text_responses=[planner_response, writer_response, "APPROVED"]
+    )
+    fake_github = FakeGitHubPublisher()
+    fake_store = FakeContextStore()
+    service = OrchestratorService(
+        llm_client=fake_llm,
+        github_publisher=fake_github,
+        context_store=fake_store,
+        config=OrchestratorConfig(max_retries=2),
+    )
+
+    result = await service.run(drift_report, full_docs)
+
+    assert result.verification_status == "passed"
+    assert len(fake_github.calls) == 1
+    assert set(fake_github.calls[0]["updated_docs"]) == {"docs/api.md"}
+    assert result.files_updated == ["docs/api.md"]
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # Test 2: Verifier/Reviewer Repair Loop
 # ════════════════════════════════════════════════════════════════════════════
 

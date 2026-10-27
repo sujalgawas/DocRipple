@@ -115,6 +115,38 @@ async def test_fastembed_mode_falls_back_when_package_missing(
 
 
 @pytest.mark.asyncio
+async def test_auth_config_callback_uses_request_host() -> None:
+    """Deployed origins must never advertise a localhost OAuth callback."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="https://docripple.vercel.app"
+    ) as client:
+        response = await client.get("/api/v1/auth/config")
+
+    assert response.status_code == 200
+    callback_url = response.json()["callback_url"]
+    assert "docripple.vercel.app" in callback_url
+    assert "localhost" not in callback_url
+
+
+def test_public_webhook_url_defaults_blank_on_vercel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Vercel, never default the webhook to the Render hostname."""
+    import importlib
+
+    import src.config as config_module
+
+    monkeypatch.setenv("VERCEL", "1")
+    try:
+        reloaded = importlib.reload(config_module)
+        assert reloaded.AppSettings().PUBLIC_WEBHOOK_URL == ""
+    finally:
+        monkeypatch.delenv("VERCEL", raising=False)
+        importlib.reload(config_module)
+
+
+@pytest.mark.asyncio
 async def test_seed_default_repository_is_idempotent(tmp_path) -> None:
     """Cold boots populate the demo workspace exactly once."""
     store = SqliteContextStore(str(tmp_path / "seed.db"))
