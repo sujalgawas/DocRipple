@@ -44,6 +44,36 @@ flowchart TD
 | 4 | Orchestration | Plans, writes, verifies, reviews, and publishes a documentation patch. | Yes |
 | 5 | Persistence | Stores run state, evidence, repository memory, and activity history. | No |
 
+#### Recent Code Updates
+
+### `dashboard` (route)
+
+```python
+async def dashboard(request: Request) -> dict:
+```
+> *Change (modified)*: @@ -7,6 +7,7 @@
+ 
+ from __future__ import annotations
+ 
++import asyncio
+ import logging
+ import os
+ from datetime import UTC, datetime
+@@ -625,6 +626,
+
+### `request` (function)
+
+```python
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+```
+> *Change (modified)*: @@ -420,6 +420,26 @@ export function clearLocalSync(): void {
+   } catch {}
+ }
+ 
++const STALE_RUN_TIMEOUT_MS = 75 * 1000;
++
++export function sanitizeR
+
 ## Project layout
 
 ```text
