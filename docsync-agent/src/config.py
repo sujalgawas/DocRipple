@@ -18,8 +18,15 @@ class AppSettings(BaseSettings):
     GITHUB_TOKEN: str = ""
     GITHUB_CLIENT_ID: str = ""
     GITHUB_CLIENT_SECRET: str = ""
+
+    # The Render hostname is only a sensible default off Vercel. On Vercel the
+    # deployment has its own hostname, so leave this unset unless configured:
+    # connect_repo then skips webhook installation instead of registering a
+    # webhook that points at a different service.
     PUBLIC_WEBHOOK_URL: str = (
-        "https://docripple-api.onrender.com/api/v1/webhooks/github"
+        ""
+        if os.getenv("VERCEL")
+        else "https://docripple-api.onrender.com/api/v1/webhooks/github"
     )
     GITHUB_WEBHOOK_SECRET: str = "docripple-secret"
     FRONTEND_URL: str = "http://localhost:5173"

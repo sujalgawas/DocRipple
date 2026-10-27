@@ -186,12 +186,19 @@ def _update_env_file(updates: dict[str, str]) -> None:
 
 
 @router.get("/auth/config")
-async def get_auth_config() -> dict:
-    """Return whether OAuth is configured and callback info."""
+async def get_auth_config(request: Request) -> dict:
+    """Return whether OAuth is configured and the live callback URL."""
+    # Derive the callback from the incoming request so deployed environments
+    # (Vercel/Render) never advertise a localhost redirect URI.
+    try:
+        callback_url = str(request.url_for("github_callback"))
+    except Exception:  # noqa: BLE001 - config info must never 500
+        callback_url = ""
+
     return {
         "oauth_configured": bool(settings.GITHUB_CLIENT_ID and settings.GITHUB_CLIENT_SECRET),
         "client_id": settings.GITHUB_CLIENT_ID or None,
-        "callback_url": "http://localhost:8000/api/v1/auth/github/callback",
+        "callback_url": callback_url,
     }
 
 
@@ -487,13 +494,13 @@ async def repo_history(
             commits = await service.list_repo_commits(
                 repo_full_name, branch=watch_branch, per_page=15
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - history is best-effort
             logger.warning("Failed to fetch commits for %s: %s", repo_full_name, exc)
         try:
             pull_requests = await service.list_repo_pull_requests(
                 repo_full_name, per_page=10
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - history is best-effort
             logger.warning("Failed to fetch PRs for %s: %s", repo_full_name, exc)
 
     activity_runs = await store.list_activity_runs(repo_full_name=repo_full_name)
@@ -703,15 +710,16 @@ async def trigger_repo(
         if payload and getattr(payload, "check_duplicate", False):
             latest_run = existing_runs[0]
             latest_sha = latest_run.get("commit_sha") or ""
-            if _is_same_commit(latest_sha, target_sha):
-                if latest_run.get("status") in {"no_drift", "pr_open", "merged", "synced"}:
-                    return {
-                        "status": "already_synced",
-                        "message": f"Commit {short_target_sha} has already been synced with no further drift detected.",
-                        "delivery_id": latest_run["delivery_id"],
-                        "commit_sha": target_sha,
-                        "branch": branch,
-                    }
+            if _is_same_commit(latest_sha, target_sha) and latest_run.get(
+                "status"
+            ) in {"no_drift", "pr_open", "merged", "synced"}:
+                return {
+                    "status": "already_synced",
+                    "message": f"Commit {short_target_sha} has already been synced with no further drift detected.",
+                    "delivery_id": latest_run["delivery_id"],
+                    "commit_sha": target_sha,
+                    "branch": branch,
+                }
 
     delivery_id = f"manual-{uuid4().hex[:12]}"
     job = WebhookJob(
