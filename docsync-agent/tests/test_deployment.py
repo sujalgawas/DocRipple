@@ -219,17 +219,7 @@ async def test_seed_default_repository_is_idempotent(tmp_path) -> None:
         assert repos[0]["watch_branch"] == "main"
 
         runs = await store.list_activity_runs(repo_full_name=SEED_REPO_FULL_NAME)
-        assert [run["delivery_id"] for run in runs] == [
-            "seed-docripple-0003",
-            "seed-docripple-0002",
-            "seed-docripple-0001",
-        ]
-        assert {run["status"] for run in runs} == {
-            "merged",
-            "no_drift",
-            "pr_open",
-        }
-        assert any(run["pr_number"] == 13 for run in runs)
+        assert len(runs) == 0
 
         skill = await store.get_style_skill(SEED_REPO_FULL_NAME)
         assert skill is not None

@@ -91,6 +91,13 @@ class SqliteContextStore:
         except Exception:
             pass
 
+        try:
+            await self._conn.execute(
+                "DELETE FROM activity_runs WHERE delivery_id LIKE 'seed-%'"
+            )
+        except Exception:
+            pass
+
         await self._conn.commit()
         logger.info("SqliteContextStore initialised at %s", self._db_path)
 
@@ -701,10 +708,10 @@ class SqliteContextStore:
         limit: int | None = None,
     ) -> list[dict]:
         """Return activity runs newest first, optionally scoped to a repo."""
-        query = "SELECT * FROM activity_runs"
+        query = "SELECT * FROM activity_runs WHERE delivery_id NOT LIKE 'seed-%'"
         params: list[object] = []
         if repo_full_name:
-            query += " WHERE repo_full_name = ?"
+            query += " AND repo_full_name = ?"
             params.append(repo_full_name)
         query += " ORDER BY created_at DESC, delivery_id DESC"
         if limit is not None:
@@ -719,19 +726,19 @@ class SqliteContextStore:
         """Aggregate dashboard counters from activity runs."""
         week_start = (datetime.now(UTC) - timedelta(days=7)).isoformat()
         cursor = await self._db.execute(
-            "SELECT COUNT(*) FROM activity_runs WHERE created_at >= ?",
+            "SELECT COUNT(*) FROM activity_runs WHERE created_at >= ? AND delivery_id NOT LIKE 'seed-%'",
             (week_start,),
         )
         runs_this_week = (await cursor.fetchone())[0]
 
         cursor = await self._db.execute(
             "SELECT COUNT(*) FROM activity_runs "
-            "WHERE status = 'no_drift' AND llm_calls = 0"
+            "WHERE status = 'no_drift' AND llm_calls = 0 AND delivery_id NOT LIKE 'seed-%'"
         )
         skipped_zero_tokens = (await cursor.fetchone())[0]
 
         cursor = await self._db.execute(
-            "SELECT COUNT(*) FROM activity_runs WHERE status = 'merged'"
+            "SELECT COUNT(*) FROM activity_runs WHERE status = 'merged' AND delivery_id NOT LIKE 'seed-%'"
         )
         prs_merged = (await cursor.fetchone())[0]
 
@@ -744,7 +751,7 @@ class SqliteContextStore:
     async def get_run_counts_by_repo(self) -> dict[str, int]:
         """Return activity counts keyed by repository full name."""
         cursor = await self._db.execute(
-            "SELECT repo_full_name, COUNT(*) FROM activity_runs GROUP BY repo_full_name"
+            "SELECT repo_full_name, COUNT(*) FROM activity_runs WHERE delivery_id NOT LIKE 'seed-%' GROUP BY repo_full_name"
         )
         rows = await cursor.fetchall()
         return {row[0]: int(row[1]) for row in rows}

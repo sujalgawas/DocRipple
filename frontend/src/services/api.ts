@@ -116,7 +116,7 @@ export interface GitHubRepoSummary {
   updated_at: string | null;
 }
 
-export type RunStatus = "running" | "no_drift" | "pr_open" | "merged" | "failed";
+export type RunStatus = "running" | "no_drift" | "pr_open" | "merged" | "failed" | "synced";
 
 export interface ActivityDiffPreview {
   file_path: string;

@@ -46,11 +46,23 @@ export const RunInspectorDrawer: React.FC<RunInspectorDrawerProps> = ({ run, onC
           dot: "bg-emerald-400",
           label: "merged",
         };
+      case "synced":
+        return {
+          pill: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400",
+          dot: "bg-emerald-400",
+          label: "synced",
+        };
       case "failed":
         return {
           pill: "border-red-500/30 bg-red-500/10 text-red-400",
           dot: "bg-red-400",
           label: "failed",
+        };
+      default:
+        return {
+          pill: "border-[#26231D] bg-[#1F1D18] text-[#8E897F]",
+          dot: "bg-[#8E897F]",
+          label: run.status,
         };
     }
   };

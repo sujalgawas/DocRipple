@@ -381,11 +381,13 @@ function getItemStatus(
   // Metric computation from real GitHub API + DocRipple context store
   const totalCommitsCount =
     repoHistory?.stats?.total_commits ?? repoHistory?.commits?.length ?? 0;
-  const totalRunsCount = runs.length;
+  const totalRunsCount =
+    repoHistory?.stats?.total_runs ??
+    runs.filter((r) => !r.delivery_id.startsWith("gh-") && !r.delivery_id.startsWith("seed-")).length;
   const totalPrsCount =
     repoHistory?.stats?.pull_requests_count ??
     repoHistory?.pull_requests?.length ??
-    runs.filter((r) => r.pr_number !== null).length;
+    runs.filter((r) => r.pr_number !== null && !r.delivery_id.startsWith("seed-")).length;
   const watchBranch =
     repoHistory?.watch_branch || monitoredRepo?.watch_branch || "main";
   const isListening = monitoredRepo?.status === "listening";

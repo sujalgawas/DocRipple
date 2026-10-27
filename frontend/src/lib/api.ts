@@ -122,7 +122,7 @@ export interface DemoRunResponse {
   publish_result?: PublishResult | null;
 }
 
-export type RunStatus = "running" | "no_drift" | "pr_open" | "merged" | "failed";
+export type RunStatus = "running" | "no_drift" | "pr_open" | "merged" | "failed" | "synced";
 
 export interface PipelineStageState {
   stage_id: string;

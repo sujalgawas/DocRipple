@@ -29,6 +29,11 @@ const statusStyles: Record<
     dot: "bg-[#8E897F]",
     label: "no drift",
   },
+  synced: {
+    pill: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400",
+    dot: "bg-emerald-400",
+    label: "synced",
+  },
   pr_open: {
     pill: "border-accent-orange/30 bg-accent-orange/10 text-accent-orange",
     dot: "bg-accent-orange",
