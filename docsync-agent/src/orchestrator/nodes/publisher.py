@@ -35,18 +35,31 @@ def build_publisher_node(
         drift = state["drift_report"]
         change_report = drift.change_report
         updated_docs: dict[str, str] = state.get("updated_docs", {})
+        full_docs: dict[str, str] = state.get("full_docs", {})
         drafts = state.get("drafts", [])
         verification_errors: list[str] = state.get("verification_errors", [])
         retry_count: int = state.get("retry_count", 0)
 
-        if not updated_docs:
-            logger.info("No updated docs to publish")
-            result = PublishResult(
-                delivery_id=change_report.delivery_id,
-                verification_status="failed",
-                error="No updated docs",
+        # Only publish documents whose content actually changed. Committing
+        # untouched docs bloats the PR and can fail on pre-existing markdown.
+        changed_docs = {
+            path: content
+            for path, content in updated_docs.items()
+            if full_docs.get(path) != content
+        }
+
+        if not changed_docs:
+            logger.info(
+                "No documentation changes to publish for %s",
+                change_report.delivery_id,
             )
-            return {"publish_result": result}
+            return {
+                "publish_result": PublishResult(
+                    delivery_id=change_report.delivery_id,
+                    verification_status="failed" if verification_errors else "passed",
+                    evidence_table_md=_build_evidence_table([]),
+                )
+            }
 
         # Derive verification status:
         #   "failed"   → errors remain at publish time (forced approve)
@@ -83,6 +96,8 @@ def build_publisher_node(
                         )
                     )
 
+        # Keep evidence aligned with the docs we are actually publishing.
+        all_evidence = [row for row in all_evidence if row.doc_file in changed_docs]
         evidence_table_md = _build_evidence_table(all_evidence)
 
         # ── Create PR ─────────────────────────────────────────────────
@@ -90,7 +105,7 @@ def build_publisher_node(
         branch_name = f"docsync/{delivery_id[:8]}"
         pr_title = f"docs: sync for {delivery_id[:8]}"
 
-        files_list = "\n".join(f"- `{p}`" for p in sorted(updated_docs.keys()))
+        files_list = "\n".join(f"- `{p}`" for p in sorted(changed_docs.keys()))
         pr_body = f"""## DocSync Update
 
 ### Evidence Table
@@ -107,7 +122,7 @@ def build_publisher_node(
                 repo_full_name=change_report.repo_full_name,
                 base_sha=change_report.base_sha,
                 branch_name=branch_name,
-                updated_docs=updated_docs,
+                updated_docs=changed_docs,
                 pr_title=pr_title,
                 pr_body=pr_body,
             )
@@ -138,7 +153,7 @@ def build_publisher_node(
                 pr_number=pr_number,
                 evidence_table_md=evidence_table_md,
                 verification_status=verification_status,
-                files_updated=sorted(updated_docs.keys()),
+                files_updated=sorted(changed_docs.keys()),
             )
 
             # Persist publish result

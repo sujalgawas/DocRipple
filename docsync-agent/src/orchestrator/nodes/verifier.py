@@ -38,6 +38,10 @@ def build_verifier_node():
                             )
 
         for doc_path, content in updated_docs.items():
+            # Untouched docs must not block the run on pre-existing markdown.
+            if doc_path in full_docs and full_docs[doc_path] == content:
+                continue
+
             # 2. Check code fences are balanced
             fences = _CODE_FENCE_PATTERN.findall(content)
             if len(fences) % 2 != 0:

@@ -25,7 +25,11 @@ def build_writer_node(llm_client: LLMClientProtocol):
         review_feedback: str = state.get("review_feedback", "")
         verification_errors: list[str] = state.get("verification_errors", [])
         retry_count: int = state.get("retry_count", 0)
-        updated_docs: dict[str, str] = dict(full_docs)
+        # Only documents whose sections are actually rewritten are tracked here.
+        # Seeding this with every doc in the repo makes the verifier flag
+        # pre-existing issues in untouched docs and makes the publisher commit
+        # docs that did not change.
+        updated_docs: dict[str, str] = {}
         style_skill = state.get("doc_style_skill")
 
         drift = state["drift_report"]
