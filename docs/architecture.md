@@ -2,6 +2,8 @@
 
 DocRipple runs a **Stage 0 onboarding** pass when a repository is registered, then processes each webhook through **Stages 1–5**. Stage 0 makes generated documentation repository-specific: it mines a writing-style skill and builds a hierarchical memory map before any diff is analyzed.
 
+The architecture is intentionally split into a deterministic gate and a model-assisted repair loop. Parsing, classification, matching, idempotency, and verification stay in ordinary code so they can be tested and reproduced. The LLM is responsible for language generation and review only after the system has evidence that a documented behavior may have changed.
+
 <details open>
 <summary><b>Interactive Flowchart (Mermaid)</b></summary>
 
@@ -62,6 +64,41 @@ flowchart TD
 | **3. Drift Engine** | `src/drift/` | No | Match changed symbols to impacted Markdown sections; use memory-map graph edges and deterministic embeddings. |
 | **4. Orchestrator** | `src/orchestrator/` | Yes | Plan, write, verify, review, and publish personalized documentation updates. |
 | **5. ContextStore & Publish** | `src/context_store/` | No | Persist style skills, memory nodes/edges, code-doc edges, runs, and traces in SQLite WAL. |
+
+## Deployment shape
+
+The production system keeps the browser and API independently deployable:
+
+```text
+Vercel React application
+          |
+          | VITE_API_BASE_URL
+          v
+Render FastAPI service
+          |
+          +--> GitHub REST API and webhooks
+          +--> OpenRouter-compatible model API
+          +--> SQLite context and checkpoint files
+```
+
+The API accepts the canonical `POST /api/v1/webhooks/github` route plus
+`POST /webhook` and `POST /api/v1/webhook` compatibility aliases. The health
+probe accepts both `GET` and `HEAD`, which makes it usable from Render and
+external uptime services.
+
+## Why the boundaries exist
+
+- **Onboarding is separate from webhook processing** so repository-specific
+  style and memory are available before the first change arrives.
+- **Analyzer and drift are deterministic** so unrelated commits can exit
+  without model cost and reviewers can trace the reason for every match.
+- **Contracts are shared** so the pipeline cannot silently change the shape of
+  `WebhookJob`, `ChangeReport`, `DriftReport`, or `PublishResult` between
+  stages.
+- **The orchestrator is bounded by the drift report** so the writer receives
+  impacted sections rather than an entire repository.
+- **Publishing is Git-based** so every generated change remains reviewable,
+  revertible, and attributable to a delivery ID.
 
 ---
 
