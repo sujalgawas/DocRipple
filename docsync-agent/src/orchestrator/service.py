@@ -76,6 +76,9 @@ class OrchestratorService:
             base_url=self._config.llm_base_url,
             api_key=self._config.llm_api_key,
             model=self._config.llm_model,
+            fallback_base_url=self._config.fallback_llm_base_url,
+            fallback_api_key=self._config.fallback_llm_api_key,
+            fallback_model=self._config.fallback_llm_model,
         )
         self._llm_client = _CountingLLMClient(inner_llm)
         self.last_llm_calls = 0

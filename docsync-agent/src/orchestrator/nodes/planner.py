@@ -36,9 +36,9 @@ def build_planner_node(llm_client: LLMClientProtocol):
                     "change_class": s.change_class,
                     "change_type": s.change_type,
                     "new_signature": s.new_signature,
-                    "diff_hunk": s.diff_hunk,
+                    "diff_hunk": (s.diff_hunk or "")[:600],
                 }
-                for s in change_report.changed_symbols
+                for s in change_report.changed_symbols[:30]
             ],
             indent=2,
         )
@@ -51,9 +51,9 @@ def build_planner_node(llm_client: LLMClientProtocol):
                     "matched_symbols": sec.matched_symbols,
                     "match_method": sec.match_method,
                     "confidence": sec.confidence,
-                    "current_markdown": sec.current_markdown[:3000],
+                    "current_markdown": sec.current_markdown[:2000],
                 }
-                for sec in drift.impacted_sections
+                for sec in drift.impacted_sections[:15]
             ],
             indent=2,
         )

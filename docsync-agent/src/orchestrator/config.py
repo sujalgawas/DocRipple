@@ -15,6 +15,10 @@ class OrchestratorConfig(BaseSettings):
     llm_api_key: str = "dev-key"
     llm_model: str = "qwen/qwen-2.5-coder-32b-instruct"
 
+    fallback_llm_base_url: str = "https://openrouter.ai/api/v1"
+    fallback_llm_api_key: str = ""
+    fallback_llm_model: str = "qwen/qwen-2.5-coder-32b-instruct"
+
     github_token: str = "dev-github-token"
 
     checkpoint_db_path: str = ":memory:"

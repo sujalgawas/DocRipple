@@ -43,6 +43,12 @@ class AppSettings(BaseSettings):
     LLM_API_KEY: str = "dev-key"
     LLM_MODEL: str = "qwen/qwen-2.5-coder-32b-instruct"
 
+    # Fallback provider configuration (e.g. OpenRouter when primary hits rate limits)
+    FALLBACK_LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
+    FALLBACK_LLM_API_KEY: str = ""
+    FALLBACK_LLM_MODEL: str = "qwen/qwen-2.5-coder-32b-instruct"
+    OPENROUTER_API_KEY: str = ""
+
     # Vercel mounts the deployment bundle at the read-only /var/task path, so
     # SQLite must live on the writable /tmp mount instead.
     SQLITE_DB_PATH: str = (
