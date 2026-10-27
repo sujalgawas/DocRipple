@@ -330,7 +330,7 @@ async def github_callback(
         raise _github_failure(exc) from exc
 
     return RedirectResponse(
-        url=f"{_frontend_base()}/repositories/new", status_code=307
+        url=f"{settings.FRONTEND_URL.rstrip('/')}/repositories", status_code=307
     )
 
 

@@ -359,79 +359,148 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logging.basicConfig(level=settings.LOG_LEVEL)
     logger.info("Starting DocSync application...")
 
-    # 1. Initialize ContextStore
-    store = SqliteContextStore(settings.SQLITE_DB_PATH)
-    await store.initialize()
+    store: SqliteContextStore | None = None
+    worker: BackgroundQueueWorker | None = None
 
-    # 2. Seed a fresh deployment so the dashboard is never empty. Render's
-    #    free tier resets /tmp on each redeploy, so this runs on cold boot.
     try:
-        await seed_default_repository(store)
-    except Exception:
-        logger.exception("Could not seed the demo workspace; continuing startup")
+        # 1. Initialize ContextStore
+        store = SqliteContextStore(settings.SQLITE_DB_PATH)
+        await store.initialize()
 
-    # 3. Shared Webhook Queue
-    queue: asyncio.Queue[WebhookJob] = asyncio.Queue()
+        # 2. Seed a fresh deployment so the dashboard is never empty. Render's
+        #    free tier resets /tmp on each redeploy, so this runs on cold boot.
+        try:
+            await seed_default_repository(store)
+        except Exception:
+            logger.exception("Could not seed the demo workspace; continuing startup")
 
-    # 4. Domain module services
-    analyzer = ChangeAnalyzerService()
-    drift_engine = DriftEngineService()
-    onboarding_service = OnboardingService(context_store=store)
-    orchestrator_config = OrchestratorConfig(
-        llm_base_url=settings.LLM_BASE_URL,
-        llm_api_key=settings.LLM_API_KEY,
-        llm_model=settings.LLM_MODEL,
-        github_token=settings.GITHUB_TOKEN,
-        checkpoint_db_path=settings.CHECKPOINT_DB_PATH,
-        max_retries=settings.MAX_RETRIES,
-    )
-    github_service = GitHubService(token=settings.GITHUB_TOKEN)
-    orchestrator = OrchestratorService(
-        context_store=store,
-        config=orchestrator_config,
-        github_publisher=GitHubServicePublisher(github_service),
-    )
+        # 3. Shared Webhook Queue
+        queue: asyncio.Queue[WebhookJob] = asyncio.Queue()
 
-    fetcher = GitHubRepoFetcher(token=settings.GITHUB_TOKEN)
-    pipeline = DocSyncPipeline(
-        analyzer=analyzer,
-        drift_engine=drift_engine,
-        orchestrator=orchestrator,
-        context_store=store,
-        fetcher=fetcher,
-        github_service=github_service,
-    )
+        # 4. Domain module services
+        analyzer = ChangeAnalyzerService()
+        drift_engine = DriftEngineService()
+        onboarding_service = OnboardingService(context_store=store)
+        orchestrator_config = OrchestratorConfig(
+            llm_base_url=settings.LLM_BASE_URL,
+            llm_api_key=settings.LLM_API_KEY,
+            llm_model=settings.LLM_MODEL,
+            github_token=settings.GITHUB_TOKEN,
+            checkpoint_db_path=settings.CHECKPOINT_DB_PATH,
+            max_retries=settings.MAX_RETRIES,
+        )
+        github_service = GitHubService(token=settings.GITHUB_TOKEN)
+        orchestrator = OrchestratorService(
+            context_store=store,
+            config=orchestrator_config,
+            github_publisher=GitHubServicePublisher(github_service),
+        )
 
-    # Vercel Functions freeze background tasks once the response is returned,
-    # so a long-lived queue worker would strand work forever. In inline mode
-    # the request handlers execute the job directly instead of starting it.
-    execution_mode = (settings.EXECUTION_MODE or "inline").strip().lower()
-    inline_execution = bool(os.getenv("VERCEL")) and execution_mode != "queue"
+        fetcher = GitHubRepoFetcher(token=settings.GITHUB_TOKEN)
+        pipeline = DocSyncPipeline(
+            analyzer=analyzer,
+            drift_engine=drift_engine,
+            orchestrator=orchestrator,
+            context_store=store,
+            fetcher=fetcher,
+            github_service=github_service,
+        )
 
-    worker = BackgroundQueueWorker(queue=queue, pipeline=pipeline)
-    if not inline_execution:
-        worker.start()
+        # Vercel Functions freeze background tasks once the response is returned,
+        # so a long-lived queue worker would strand work forever. In inline mode
+        # the request handlers execute the job directly instead of starting it.
+        execution_mode = (settings.EXECUTION_MODE or "inline").strip().lower()
+        inline_execution = bool(os.getenv("VERCEL")) and execution_mode != "queue"
 
-    # Attach to app.state
-    app.state.queue = queue
-    app.state.webhook_queue = queue
-    app.state.context_store = store
-    app.state.onboarding_service = onboarding_service
-    app.state.pipeline = pipeline
-    app.state.worker = worker
-    app.state.execution_mode = execution_mode
-    app.state.inline_execution = inline_execution
-    app.state.settings = settings
-    app.state.github_service = github_service
-    app.state.github_oauth_token = ""
+        worker = BackgroundQueueWorker(queue=queue, pipeline=pipeline)
+        if not inline_execution:
+            worker.start()
 
-    logger.info("DocSync application startup complete")
+        # Attach to app.state
+        app.state.queue = queue
+        app.state.webhook_queue = queue
+        app.state.context_store = store
+        app.state.onboarding_service = onboarding_service
+        app.state.pipeline = pipeline
+        app.state.worker = worker
+        app.state.execution_mode = execution_mode
+        app.state.inline_execution = inline_execution
+        app.state.settings = settings
+        app.state.github_service = github_service
+        app.state.github_oauth_token = ""
+
+        logger.info("DocSync application startup complete")
+    except Exception as exc:
+        logger.exception("DocSync startup failed; falling back to memory store: %s", exc)
+        try:
+            if store is not None:
+                try:
+                    await store.close()
+                except Exception:
+                    pass
+            store = SqliteContextStore(":memory:")
+            await store.initialize()
+            try:
+                await seed_default_repository(store)
+            except Exception:
+                pass
+            queue = asyncio.Queue()
+            analyzer = ChangeAnalyzerService()
+            drift_engine = DriftEngineService()
+            onboarding_service = OnboardingService(context_store=store)
+            orchestrator_config = OrchestratorConfig(
+                llm_base_url=settings.LLM_BASE_URL,
+                llm_api_key=settings.LLM_API_KEY,
+                llm_model=settings.LLM_MODEL,
+                github_token=settings.GITHUB_TOKEN,
+                checkpoint_db_path=":memory:",
+                max_retries=settings.MAX_RETRIES,
+            )
+            github_service = GitHubService(token=settings.GITHUB_TOKEN)
+            orchestrator = OrchestratorService(
+                context_store=store,
+                config=orchestrator_config,
+                github_publisher=GitHubServicePublisher(github_service),
+            )
+            fetcher = GitHubRepoFetcher(token=settings.GITHUB_TOKEN)
+            pipeline = DocSyncPipeline(
+                analyzer=analyzer,
+                drift_engine=drift_engine,
+                orchestrator=orchestrator,
+                context_store=store,
+                fetcher=fetcher,
+                github_service=github_service,
+            )
+            worker = BackgroundQueueWorker(queue=queue, pipeline=pipeline)
+            app.state.queue = queue
+            app.state.webhook_queue = queue
+            app.state.context_store = store
+            app.state.onboarding_service = onboarding_service
+            app.state.pipeline = pipeline
+            app.state.worker = worker
+            app.state.execution_mode = "inline"
+            app.state.inline_execution = True
+            app.state.settings = settings
+            app.state.github_service = github_service
+            app.state.github_oauth_token = ""
+            logger.info("DocSync fallback startup complete")
+        except Exception:
+            logger.exception("Fallback initialization also encountered error; continuing to yield")
+
     try:
         yield
     finally:
         logger.info("Shutting down DocSync application...")
-        await worker.stop()
-        await store.close()
+        if worker is not None:
+            try:
+                await worker.stop()
+            except Exception:
+                pass
+        if store is not None:
+            try:
+                await store.close()
+            except Exception:
+                pass
         logger.info("DocSync shutdown complete")
 
 
@@ -484,9 +553,11 @@ app.include_router(web_api_router)
 # ── Observability & Demo Endpoints ──────────────────────────────────────────
 
 
+@app.api_route("/", methods=["GET", "HEAD"], tags=["system"])
 @app.api_route("/health", methods=["GET", "HEAD"], tags=["system"])
+@app.api_route("/api/v1/health", methods=["GET", "HEAD"], tags=["system"])
 async def health() -> dict[str, str]:
-    """Lightweight liveness probe used by Render and keep-alive pingers."""
+    """Lightweight liveness probe used by Render, Vercel, and keep-alive pingers."""
     return {"status": "ok", "service": "docripple-api"}
 
 

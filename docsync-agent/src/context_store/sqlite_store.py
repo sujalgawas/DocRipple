@@ -50,7 +50,10 @@ class SqliteContextStore:
     """Persistent, async SQLite store fulfilling ContextStoreProtocol + extensions."""
 
     def __init__(self, db_path: str = "docsync_context.db") -> None:
-        self._db_path = _resolve_writable_db_path(db_path)
+        if os.getenv("VERCEL") and db_path != ":memory:":
+            self._db_path = "/tmp/docsync_context.db"
+        else:
+            self._db_path = _resolve_writable_db_path(db_path)
         self._conn: aiosqlite.Connection | None = None
 
     # ── Lifecycle ────────────────────────────────────────────────────────
@@ -59,7 +62,7 @@ class SqliteContextStore:
         """Open the database, enable WAL/foreign keys, and run schema migrations."""
         try:
             self._conn = await aiosqlite.connect(self._db_path)
-        except sqlite3.OperationalError:
+        except Exception:
             self._db_path = ":memory:"
             self._conn = await aiosqlite.connect(":memory:")
 

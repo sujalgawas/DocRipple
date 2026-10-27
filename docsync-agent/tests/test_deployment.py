@@ -14,20 +14,21 @@ from src.main import SEED_REPO_FULL_NAME, app, seed_default_repository
 
 
 @pytest.mark.asyncio
-async def test_health_supports_get_and_head() -> None:
-    """Render and uptime pingers use either GET or HEAD."""
+@pytest.mark.parametrize("path", ["/", "/health", "/api/v1/health"])
+async def test_health_supports_get_and_head(path: str) -> None:
+    """Render, Vercel, and uptime pingers use /, /health, or /api/v1/health with GET or HEAD."""
     transport = ASGITransport(app=app)
     async with AsyncClient(
         transport=transport, base_url="http://testserver"
     ) as client:
-        get_response = await client.get("/health")
+        get_response = await client.get(path)
         assert get_response.status_code == 200
         assert get_response.json() == {
             "status": "ok",
             "service": "docripple-api",
         }
 
-        head_response = await client.head("/health")
+        head_response = await client.head(path)
         assert head_response.status_code == 200
         assert head_response.content == b""
 
@@ -233,3 +234,28 @@ async def test_seed_default_repository_is_idempotent(tmp_path) -> None:
         assert memory.edges
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_never_raises_on_startup_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup exceptions must never prevent lifespan from yielding."""
+    from fastapi import FastAPI
+    from src.main import lifespan
+
+    test_fastapi = FastAPI(lifespan=lifespan)
+
+    orig_init = SqliteContextStore.__init__
+    called = False
+
+    def failing_init(self, db_path="docsync_context.db"):
+        nonlocal called
+        if not called:
+            called = True
+            raise RuntimeError("Simulated startup disk failure")
+        orig_init(self, db_path)
+
+    monkeypatch.setattr(SqliteContextStore, "__init__", failing_init)
+
+    async with lifespan(test_fastapi):
+        assert test_fastapi.state.context_store is not None
+        assert test_fastapi.state.context_store._db_path == ":memory:"

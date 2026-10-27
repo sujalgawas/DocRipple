@@ -281,3 +281,26 @@ async def test_auth_login_redirects_to_github_when_configured(app, monkeypatch):
     assert location.startswith("https://github.com/login/oauth/authorize?")
     assert "client_id=client-id" in location
     assert "state=" in location
+
+
+@pytest.mark.asyncio
+async def test_auth_github_callback_redirects_to_repositories(app, monkeypatch):
+    test_app, _, _ = app
+    monkeypatch.setattr(settings, "FRONTEND_URL", "https://docripple.vercel.app")
+    test_app.state.oauth_state = "valid-state"
+    test_app.state.oauth_redirect_uri = "https://docripple.vercel.app/api/v1/auth/github/callback"
+
+    async def fake_exchange(code, redirect_uri=None):
+        return "gho_fake_token"
+
+    test_app.state.github_service.exchange_oauth_code = fake_exchange
+
+    transport = ASGITransport(app=test_app)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", follow_redirects=False
+    ) as client:
+        response = await client.get(
+            "/api/v1/auth/github/callback?code=some_code&state=valid-state"
+        )
+    assert response.status_code == 307
+    assert response.headers["location"] == "https://docripple.vercel.app/repositories"
